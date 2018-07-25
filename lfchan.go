@@ -50,16 +50,27 @@ func (c* LFChan) sendOrReceiveSuspend(element unsafe.Pointer) unsafe.Pointer {
 		// If the waiting queue is empty, `headDeqIdx == headEnqIdx`.
 		// This can also happen if the `head` node is full (`headDeqIdx == segmentSize`).
 		if (headDeqIdx == headEnqIdx) {
+			gp := runtime.GetGoroutine()
 			if (headDeqIdx == c.segmentSize) {
 				// The `head` node is full. Try to move `_head`
 				// pointer forward and start the operation again.
 				if (c.adjustHead(head)) { continue try_again }
 				// Queue is empty, try to add a new node with the current continuation.
-				if (c.addNewNode(head, element)) { return parkAndThenReturn(element) }
+				runtime.AcqureMutex(gp)
+				if (c.addNewNode(head, element)) {
+					return parkAndThenReturn(element)
+				} else {
+					runtime.ReleaseMutex(gp)
+				}
 			} else {
 				// The `head` node is not full, therefore the waiting queue
 				// is empty. Try to add the current continuation to the queue.
-				if (storeContinuation(head, headEnqIdx, element)) { return parkAndThenReturn(element) }
+				runtime.AcqureMutex(gp)
+				if (storeContinuation(head, headEnqIdx, element)) {
+					return parkAndThenReturn(element)
+				} else {
+					runtime.ReleaseMutex(gp)
+				}
 			}
 		} else {
 			// The waiting queue is not empty and it is guaranteed that `headDeqIdx < headEnqIdx`.
@@ -89,60 +100,69 @@ func (c* LFChan) sendOrReceiveSuspend(element unsafe.Pointer) unsafe.Pointer {
 			// and enqueue positions. In this case it is guaranteed that the queue contains the same
 			// continuation types as on making the rendezvous decision. The same optimization is possible
 			// for adding the current continuation to the waiting queue if it fails.
-			headIdLimit := tail.id
-			headDeqIdxLimit := tailEnqIdx
+			//headIdLimit := tail.id
+			//headDeqIdxLimit := tailEnqIdx
 			if (makeRendezvous) {
 				for {
 					if (tryResumeContinuation(head, headDeqIdx, element)) {
 						// The rendezvous is happened, congratulations!
 						// Resume the current continuation
 						return firstElement
-					}
+					} else { continue try_again }
 					// Re-read the required pointers
-					read_state: for {
-						// Re-read head pointer and its deque index
-						head = c.getHead()
-						headDeqIdx = head._deqIdx
-						if (headDeqIdx == c.segmentSize) {
-							if (!c.adjustHead(head)) { continue try_again }
-							continue read_state
-						}
-						// Check that `(head.id, headDeqIdx) < (headIdLimit, headDeqIdxLimit)`
-						// and re-start the whole operation if needed
-						if (head.id > headIdLimit || (head.id == headIdLimit && headDeqIdx >= headDeqIdxLimit)) {
-							continue try_again
-						}
-						// Re-read the first element
-						firstElement = c.readElement(head, headDeqIdx)
-						if (firstElement == takenElement) {
-							atomic.CompareAndSwapInt32(&head._deqIdx, headDeqIdx, headDeqIdx + 1)
-							continue read_state
-						}
-						break read_state
-					}
+					//read_state: for {
+					//	// Re-read head pointer and its deque index
+					//	head = c.getHead()
+					//	headDeqIdx = head._deqIdx
+					//	if (headDeqIdx == c.segmentSize) {
+					//		if (!c.adjustHead(head)) { continue try_again }
+					//		continue read_state
+					//	}
+					//	// Check that `(head.id, headDeqIdx) < (headIdLimit, headDeqIdxLimit)`
+					//	// and re-start the whole operation if needed
+					//	if (head.id > headIdLimit || (head.id == headIdLimit && headDeqIdx >= headDeqIdxLimit)) {
+					//		continue try_again
+					//	}
+					//	// Re-read the first element
+					//	firstElement = c.readElement(head, headDeqIdx)
+					//	if (firstElement == takenElement) {
+					//		atomic.CompareAndSwapInt32(&head._deqIdx, headDeqIdx, headDeqIdx + 1)
+					//		continue read_state
+					//	}
+					//	break read_state
+					//}
 				}
 			} else {
 				for {
 					// Try to add a new node with the current continuation and element
 					// if the tail is full, otherwise try to store it at the `tailEnqIdx` index.
+					gp := runtime.GetGoroutine()
 					if (tailEnqIdx == c.segmentSize) {
+						runtime.AcqureMutex(gp)
 						if (c.addNewNode(tail, element)) {
 							return parkAndThenReturn(element)
+						} else {
+							runtime.ReleaseMutex(gp)
+							continue try_again
 						}
 					} else {
+						runtime.AcqureMutex(gp)
 						if (storeContinuation(tail, tailEnqIdx, element)) {
 							return parkAndThenReturn(element)
+						} else {
+							runtime.ReleaseMutex(gp)
+							continue try_again
 						}
 					}
 					// Re-read the required pointers. Read tail and its indexes at first
 					// and only then head with its indexes.
-					tail = c.getTail()
-					tailEnqIdx = tail._enqIdx
-					head = c.getHead()
-					headDeqIdx = head._deqIdx
-					if (head.id > headIdLimit || (head.id == headIdLimit && headDeqIdx >= headDeqIdxLimit)) {
-						continue try_again
-					}
+					//tail = c.getTail()
+					//tailEnqIdx = tail._enqIdx
+					//head = c.getHead()
+					//headDeqIdx = head._deqIdx
+					//if (head.id > headIdLimit || (head.id == headIdLimit && headDeqIdx >= headDeqIdxLimit)) {
+					//	continue try_again
+					//}
 				}
 			}
 		}
@@ -151,11 +171,11 @@ func (c* LFChan) sendOrReceiveSuspend(element unsafe.Pointer) unsafe.Pointer {
 
 func parkAndThenReturn(sendElement unsafe.Pointer) unsafe.Pointer {
 	if (sendElement == receiverElement) {
-		runtime.ParkForReceiveUnsafe()
+		runtime.ParkReceiveAndReleaseUnsafe()
 	} else {
-		runtime.ParkForSendUnsafe()
+		runtime.ParkSendAndReleaseUnsafe()
 	}
-	return runtime.GetGParam(runtime.Getg())
+	return runtime.GetGParam(runtime.GetGoroutine())
 }
 
 // Tries to move `_head` pointer forward if the current node is full.
@@ -184,7 +204,7 @@ func (c *LFChan) addNewNode(tail *node, element unsafe.Pointer) bool {
 	// Create a new node with this continuation and element and try to add it
 	node := newNode(c.segmentSize, tail.id + 1)
 	node._data[0] = element
-	node._data[1] = runtime.Getg()
+	node._data[1] = runtime.GetGoroutine()
 	node._enqIdx = 1
 	if (tail.casNext(node)) {
 		// New node added, try to move tail,
@@ -242,7 +262,7 @@ func (c *LFChan) readElement(node *node, index int32) unsafe.Pointer {
 		return takenElement
 	} else {
 		// The element is set, read it and return
-		return atomic.LoadPointer(&node._data[index * 2]) // volatile read
+		return node._data[index * 2]
 	}
 }
 
@@ -253,8 +273,14 @@ func tryResumeContinuation(head *node, dequeIndex int32, element unsafe.Pointer)
 	if (atomic.CompareAndSwapInt32(&head._deqIdx, dequeIndex, dequeIndex + 1)) {
 		// Get a continuation at the specified index and resume it
 		gp := head._data[dequeIndex * 2 + 1]
+
+		head._data[dequeIndex * 2] = takenElement
+		head._data[dequeIndex * 2 + 1] = takenGoroutine
+
 		runtime.SetGParam(gp, element)
+		runtime.AcqureMutex(gp)
 		runtime.UnparkUnsafe(gp)
+		runtime.ReleaseMutex(gp)
 		return true
 	} else {
 		return false
@@ -271,7 +297,7 @@ func storeContinuation(node *node, index int32, element unsafe.Pointer) bool {
 	}
 	// Slot `index` is claimed, try to store the continuation and the element (in this order!) to it.
 	// Can fail if another thread marked this slot as broken, return `false` in this case.
-	node._data[index * 2 + 1] = runtime.Getg()
+	node._data[index * 2 + 1] = runtime.GetGoroutine()
 	if (atomic.CompareAndSwapPointer(&node._data[index * 2], nil, element)) {
 		// Can be suspended, return true
 		return true
@@ -282,9 +308,9 @@ func storeContinuation(node *node, index int32, element unsafe.Pointer) bool {
 	}
 }
 
-var takenGoroutine unsafe.Pointer = (unsafe.Pointer) ((uintptr) (1))
-var takenElement unsafe.Pointer = (unsafe.Pointer) ((uintptr) (2))
-var receiverElement unsafe.Pointer = (unsafe.Pointer) ((uintptr) (3))
+var takenGoroutine = (unsafe.Pointer) ((uintptr) (1))
+var takenElement = (unsafe.Pointer) ((uintptr) (2))
+var receiverElement = (unsafe.Pointer) ((uintptr) (3))
 
 func newNode(segmentSize int32, id int64) *node {
 	return &node{

@@ -14,11 +14,11 @@ func TestSimple(t *testing.T) {
 	}()
 	// Receive
 	x := c.receiveInt()
-	if (x != 10) { t.Fatal("Expected ", 10, ", found ", x) }
+	if x != 10 { t.Fatal("Expected ", 10, ", found ", x) }
 }
 
 func TestStress(t *testing.T) {
-	n := 100000
+	n := 1000000
 	c := NewLFChan(1, 10)
 	wg := sync.WaitGroup{}
 	// Run sender
@@ -35,15 +35,9 @@ func TestStress(t *testing.T) {
 		defer wg.Done()
 		for i := 100; i < 100 + n; i++ {
 			x := c.receiveInt()
-			if (x != i) { t.Fatal("Expected ", i, ", found ", x) }
+			if x != i { t.Fatal("Expected ", i, ", found ", x) }
 		}
 	}()
-	//go func() {
-	//	for {
-	//		pprof.Lookup("goroutine").WriteTo(os.Stdout, 1)
-	//		time.Sleep(1000)
-	//	}
-	//}()М
 	wg.Wait()
 }
 
