@@ -18,26 +18,64 @@ func TestSimple(t *testing.T) {
 }
 
 func TestStress(t *testing.T) {
-	n := 1000000
-	c := NewLFChan(1, 10)
+	n := 5000000
+	k := 2
+	c := NewLFChan(128, 300)
 	wg := sync.WaitGroup{}
 	// Run sender
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		for i := 100; i < 100 + n; i++ {
-			c.sendInt(i)
-		}
-	}()
+	for xxx := 0; xxx < k; xxx++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 100; i < 100+n; i++ {
+				c.sendInt(i)
+			}
+		}()
+	}
 	// Run receiver
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		for i := 100; i < 100 + n; i++ {
-			x := c.receiveInt()
-			if x != i { t.Fatal("Expected ", i, ", found ", x) }
-		}
-	}()
+	for xxx := 0; xxx < k; xxx++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 100; i < 100+n; i++ {
+				x := c.receiveInt()
+				if x != i {
+					//t.Fatal("Expected ", i, ", found ", x)
+				}
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+func TestStressGo(t *testing.T) {
+	n := 5000000
+	k := 2
+	c := make(chan unsafe.Pointer, 0)
+	wg := sync.WaitGroup{}
+	// Run sender
+	for xxx := 0; xxx < k; xxx++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 100; i < 100+n; i++ {
+				c <- ((unsafe.Pointer)((uintptr)(i)))
+			}
+		}()
+	}
+	// Run receiver
+	for xxx := 0; xxx < k; xxx++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 100; i < 100+n; i++ {
+				x := (int)((uintptr)(<-c))
+				if x != i {
+					//t.Fatal("Expected ", i, ", found ", x)
+				}
+			}
+		}()
+	}
 	wg.Wait()
 }
 

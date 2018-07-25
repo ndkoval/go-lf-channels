@@ -84,7 +84,7 @@ func (c* LFChan) sendOrReceiveSuspend(element unsafe.Pointer) unsafe.Pointer {
 			// the first element is stored. The main idea is to spin on the value a bit and then change
 			// element value from `null` to `TAKEN_ELEMENT` and increment the deque index if it is not appeared.
 			// In this case the operation should start again. This simple  approach guarantees lock-freedom.
-			firstElement := atomic.LoadPointer(&head._data[headDeqIdx * 2])
+			firstElement := c.readElement(head, headDeqIdx)
 			if (firstElement == takenElement) {
 				// Try to move the deque index in the `head` node
 				atomic.CompareAndSwapInt32(&head._deqIdx, headDeqIdx, headDeqIdx + 1)
@@ -100,37 +100,37 @@ func (c* LFChan) sendOrReceiveSuspend(element unsafe.Pointer) unsafe.Pointer {
 			// and enqueue positions. In this case it is guaranteed that the queue contains the same
 			// continuation types as on making the rendezvous decision. The same optimization is possible
 			// for adding the current continuation to the waiting queue if it fails.
-			//headIdLimit := tail.id
-			//headDeqIdxLimit := tailEnqIdx
+			headIdLimit := tail.id
+			headDeqIdxLimit := tailEnqIdx
 			if (makeRendezvous) {
 				for {
 					if (tryResumeContinuation(head, headDeqIdx, element)) {
 						// The rendezvous is happened, congratulations!
 						// Resume the current continuation
 						return firstElement
-					} else { continue try_again }
+					} // else { continue try_again }
 					// Re-read the required pointers
-					//read_state: for {
-					//	// Re-read head pointer and its deque index
-					//	head = c.getHead()
-					//	headDeqIdx = head._deqIdx
-					//	if (headDeqIdx == c.segmentSize) {
-					//		if (!c.adjustHead(head)) { continue try_again }
-					//		continue read_state
-					//	}
-					//	// Check that `(head.id, headDeqIdx) < (headIdLimit, headDeqIdxLimit)`
-					//	// and re-start the whole operation if needed
-					//	if (head.id > headIdLimit || (head.id == headIdLimit && headDeqIdx >= headDeqIdxLimit)) {
-					//		continue try_again
-					//	}
-					//	// Re-read the first element
-					//	firstElement = c.readElement(head, headDeqIdx)
-					//	if (firstElement == takenElement) {
-					//		atomic.CompareAndSwapInt32(&head._deqIdx, headDeqIdx, headDeqIdx + 1)
-					//		continue read_state
-					//	}
-					//	break read_state
-					//}
+					read_state: for {
+						// Re-read head pointer and its deque index
+						head = c.getHead()
+						headDeqIdx = head._deqIdx
+						if (headDeqIdx == c.segmentSize) {
+							if (!c.adjustHead(head)) { continue try_again }
+							continue read_state
+						}
+						// Check that `(head.id, headDeqIdx) < (headIdLimit, headDeqIdxLimit)`
+						// and re-start the whole operation if needed
+						if (head.id > headIdLimit || (head.id == headIdLimit && headDeqIdx >= headDeqIdxLimit)) {
+							continue try_again
+						}
+						// Re-read the first element
+						firstElement = c.readElement(head, headDeqIdx)
+						if (firstElement == takenElement) {
+							atomic.CompareAndSwapInt32(&head._deqIdx, headDeqIdx, headDeqIdx + 1)
+							continue read_state
+						}
+						break read_state
+					}
 				}
 			} else {
 				for {
@@ -143,7 +143,7 @@ func (c* LFChan) sendOrReceiveSuspend(element unsafe.Pointer) unsafe.Pointer {
 							return parkAndThenReturn(element)
 						} else {
 							runtime.ReleaseMutex(gp)
-							continue try_again
+						//	continue try_again
 						}
 					} else {
 						runtime.AcqureMutex(gp)
@@ -151,18 +151,18 @@ func (c* LFChan) sendOrReceiveSuspend(element unsafe.Pointer) unsafe.Pointer {
 							return parkAndThenReturn(element)
 						} else {
 							runtime.ReleaseMutex(gp)
-							continue try_again
+						//	continue try_again
 						}
 					}
 					// Re-read the required pointers. Read tail and its indexes at first
 					// and only then head with its indexes.
-					//tail = c.getTail()
-					//tailEnqIdx = tail._enqIdx
-					//head = c.getHead()
-					//headDeqIdx = head._deqIdx
-					//if (head.id > headIdLimit || (head.id == headIdLimit && headDeqIdx >= headDeqIdxLimit)) {
-					//	continue try_again
-					//}
+					tail = c.getTail()
+					tailEnqIdx = tail._enqIdx
+					head = c.getHead()
+					headDeqIdx = head._deqIdx
+					if (head.id > headIdLimit || (head.id == headIdLimit && headDeqIdx >= headDeqIdxLimit)) {
+						continue try_again
+					}
 				}
 			}
 		}
@@ -183,7 +183,7 @@ func parkAndThenReturn(sendElement unsafe.Pointer) unsafe.Pointer {
 func (c *LFChan) adjustHead(head *node) bool {
 	// Read `_next` pointer and return `false` if the waiting queue is empty.
 	headNext := head._next
-	if (headNext == nil) { return false }
+	if headNext == nil { return false }
 	// Move `_head` forward. If the CAS fails, another thread moved it.
 	c.casHead(head, headNext)
 	return true
@@ -273,12 +273,12 @@ func tryResumeContinuation(head *node, dequeIndex int32, element unsafe.Pointer)
 	if (atomic.CompareAndSwapInt32(&head._deqIdx, dequeIndex, dequeIndex + 1)) {
 		// Get a continuation at the specified index and resume it
 		gp := head._data[dequeIndex * 2 + 1]
+		runtime.AcqureMutex(gp)
 
 		head._data[dequeIndex * 2] = takenElement
 		head._data[dequeIndex * 2 + 1] = takenGoroutine
 
 		runtime.SetGParam(gp, element)
-		runtime.AcqureMutex(gp)
 		runtime.UnparkUnsafe(gp)
 		runtime.ReleaseMutex(gp)
 		return true
