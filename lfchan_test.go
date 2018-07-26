@@ -8,7 +8,7 @@ import (
 
 func TestSimple(t *testing.T) {
 	// Run sender
-	c := NewLFChan(1, 10)
+	c := NewLFChan(10)
 	go func() {
 		c.sendInt(10)
 	}()
@@ -19,8 +19,8 @@ func TestSimple(t *testing.T) {
 
 func TestStress(t *testing.T) {
 	n := 5000000
-	k := 2
-	c := NewLFChan(128, 300)
+	k := 1
+	c := NewLFChan(100)
 	wg := sync.WaitGroup{}
 	// Run sender
 	for xxx := 0; xxx < k; xxx++ {
@@ -50,7 +50,7 @@ func TestStress(t *testing.T) {
 
 func TestStressGo(t *testing.T) {
 	n := 5000000
-	k := 2
+	k := 1
 	c := make(chan unsafe.Pointer, 0)
 	wg := sync.WaitGroup{}
 	// Run sender
