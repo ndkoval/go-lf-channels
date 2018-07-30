@@ -5,6 +5,7 @@ import (
 	"sync"
 	"fmt"
 	"unsafe"
+	"runtime"
 )
 
 func BenchmarkN1(b *testing.B) {
@@ -24,14 +25,14 @@ func BenchmarkNN(b *testing.B) {
 					consumers := producers // N:N case
 					var algo string
 					if kovalAlgo {
-						algo = "k_spin" + string(spin) + "_segm" + string(segmentSize)
+						algo = fmt.Sprint("k_spin%s_segm%s",spin, segmentSize)
 					} else {
 						algo = "golang"
 					}
 					b.Run(fmt.Sprintf("algo=%s, withSelect=%t, channels=%d, goroutines=%d, parallelism=%d",
 						algo, withSelect, channels, goroutines, parallelism),
 						func(b *testing.B) {
-							runBenchmarkGo(b, producers, consumers, channels, parallelism, withSelect, true)
+							runBenchmark(b, producers, consumers, channels, parallelism, withSelect, true)
 						})
 				}
 			}
@@ -39,10 +40,10 @@ func BenchmarkNN(b *testing.B) {
 	}
 }
 
-func runBenchmarkGo(b *testing.B, producers int, consumers int, channels int, parallelism int, withSelect bool, kovalAlgo bool) {
+func runBenchmark(b *testing.B, producers int, consumers int, channels int, parallelism int, withSelect bool, kovalAlgo bool) {
 	b.StopTimer()
 	// Set benchmark parameters
-	b.SetParallelism(parallelism)
+	runtime.GOMAXPROCS(parallelism)
 	n := lcf(producers, consumers)
 	if n < minBatchSize {
 		n = minBatchSize / n * n
