@@ -12,7 +12,7 @@ func BenchmarkN1(b *testing.B) {
 
 }
 
-const kovalAlgo = false
+const kovalAlgo = true
 func BenchmarkNN(b *testing.B) {
 	for _, withSelect := range [1]bool{false} {
 		for _, channels := range contentionFactor {
@@ -25,7 +25,7 @@ func BenchmarkNN(b *testing.B) {
 					consumers := producers // N:N case
 					var algo string
 					if kovalAlgo {
-						algo = fmt.Sprint("k_spin%s_segm%s",spin, segmentSize)
+						algo = fmt.Sprintf("k_spin%d_segm%d",spin, segmentSize)
 					} else {
 						algo = "golang"
 					}
@@ -108,7 +108,7 @@ func runWithOneChannelGo(b *testing.B, wg *sync.WaitGroup, producers int, consum
 	}
 }
 
-const spin = 300
+const spin = 1000
 func runWithOneChannelKoval(b *testing.B, wg *sync.WaitGroup, producers int, consumers int, n int, withSelect bool) {
 	c := NewLFChan(spin)
 	// Run producers
