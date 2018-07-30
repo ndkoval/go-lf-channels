@@ -4,6 +4,7 @@ import (
 	"testing"
 	"sync"
 	"fmt"
+	"unsafe"
 )
 
 func BenchmarkN1(b *testing.B) {
@@ -59,21 +60,21 @@ func runBenchmarkGo(b *testing.B, producers int, consumers int, channels int, pa
 }
 
 func runWithOneChannelGo(b *testing.B, wg *sync.WaitGroup, producers int, consumers int, n int, withSelect bool) {
-	c := make(chan int)
+	c := make(chan unsafe.Pointer)
 	// Run producers
 	for i := 0; i < producers; i++ {
-		var dummyChan chan int
-		if withSelect { dummyChan = make(chan int) }
+		var dummyChan chan unsafe.Pointer
+		if withSelect { dummyChan = make(chan unsafe.Pointer) }
 		go func() {
 			defer wg.Done()
 			for j := 0; j < n / producers; j++ {
 				if withSelect {
 					select {
-					case c <- j: { /* do nothing */ }
+					case c <- (unsafe.Pointer)((uintptr)(j)): { /* do nothing */ }
 					case <- dummyChan: { /* do nothing */ }
 					}
 				} else {
-					c <- j
+					c <- (unsafe.Pointer)((uintptr)(j))
 				}
 			}
 		}()
@@ -83,8 +84,8 @@ func runWithOneChannelGo(b *testing.B, wg *sync.WaitGroup, producers int, consum
 		go func() {
 			defer wg.Done()
 			for j := 0; j < n / consumers; j++ {
-				var dummyChan chan int
-				if withSelect { dummyChan = make(chan int) }
+				var dummyChan chan unsafe.Pointer
+				if withSelect { dummyChan = make(chan unsafe.Pointer) }
 				if withSelect {
 					select {
 					case <- c: { /* do nothing */ }
@@ -99,7 +100,7 @@ func runWithOneChannelGo(b *testing.B, wg *sync.WaitGroup, producers int, consum
 	}
 }
 
-const spin = 150
+const spin = 300
 func runWithOneChannelKoval(b *testing.B, wg *sync.WaitGroup, producers int, consumers int, n int, withSelect bool) {
 	c := NewLFChan(spin)
 	// Run producers
@@ -127,7 +128,7 @@ func runWithOneChannelKoval(b *testing.B, wg *sync.WaitGroup, producers int, con
 				if withSelect {
 					b.Fatal("Unsupported")
 				} else {
-					c.ReceiveInt()
+					c.Receive()
 				}
 
 			}
