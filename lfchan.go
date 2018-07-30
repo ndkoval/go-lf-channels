@@ -4,6 +4,7 @@ import (
 	"sync/atomic"
 	"runtime"
 	"unsafe"
+	"sync"
 )
 
 func NewLFChan(spinThreshold int) *LFChan {
@@ -14,6 +15,7 @@ func NewLFChan(spinThreshold int) *LFChan {
 		_enqIdx: 1,
 		_head: emptyNode,
 		_tail: emptyNode,
+		mutex: sync.Mutex{},
 	}
 }
 
@@ -25,6 +27,8 @@ type LFChan struct {
 
 	_head unsafe.Pointer
 	_tail unsafe.Pointer
+
+	mutex sync.Mutex
 }
 
 func (c *LFChan) Send(element unsafe.Pointer) {
@@ -56,8 +60,7 @@ func (c* LFChan) sendOrReceiveSuspend(element unsafe.Pointer) unsafe.Pointer {
 			}
 			// Check that head pointer should be moved forward
 			if headId < deqIdxNodeId {
-				headNext := head.next()
-				c.casHead(head, headNext)
+				c.casHead(head, head.next())
 				continue try_again
 			}
 			// Read the first element
@@ -70,14 +73,20 @@ func (c* LFChan) sendOrReceiveSuspend(element unsafe.Pointer) unsafe.Pointer {
 			}
 			// Decide should we make a rendezvous or not
 			makeRendezvous := (element == receiverElement && firstElement != receiverElement) || (element != receiverElement && firstElement == receiverElement)
+			//deqIdxLimit := enqIdx
 			if makeRendezvous {
 				if c.tryResumeContinuation(head, deqIdxInNode, deqIdx, element) {
 					return firstElement
-				}  else { continue try_again }
-			} else {
-				if c.addToWaitingQueue(enqIdx, element) {
-					return parkAndThenReturn(element)
 				} else { continue try_again }
+			} else {
+				//for {
+					if c.addToWaitingQueue(enqIdx, element) {
+						return parkAndThenReturn(element)
+					} else { continue try_again }
+					//enqIdx = c.enqIdx()
+					//deqIdx = c.deqIdx()
+					//if deqIdx >= deqIdxLimit { continue try_again }
+				//}
 			}
 		}
 	}
@@ -94,11 +103,11 @@ func (c *LFChan) readElement(node *node, index int32) unsafe.Pointer {
 	var attempt = 0
 	for {
 		if element != nil { return element }
-		element = atomic.LoadPointer(&node._data[index * 2]) // volatile read
 		attempt++
 		if attempt >= c.spinThreshold {
 			break
 		}
+		element = atomic.LoadPointer(&node._data[index * 2]) // volatile read
 	}
 	// Cannot spin forever, mark the slot as broken if it is still unavailable
 	if atomic.CompareAndSwapPointer(&node._data[index * 2], nil, takenElement) {
@@ -131,7 +140,7 @@ func (c *LFChan) addToWaitingQueue(enqIdx int64, element unsafe.Pointer) bool {
 	// Just check that `enqIdx` is valid and try to store the current
 	// goroutine into the `tail` by `enqIdxInNode`
 	if tailId != enqIdxNodeId { panic("Impossible!") }
-	if enqIdxInNode == 0 { panic("Impossible!!") }
+	if enqIdxInNode == 0 { panic("Impossible 2!") }
 	return c.storeContinuation(tail, enqIdxInNode, enqIdx, element)
 }
 
@@ -153,7 +162,6 @@ func (c *LFChan) addNewNode(tail *node, element unsafe.Pointer, enqIdx int64) bo
 	node := newNode(tail.id + 1)
 	node._data[0] = element
 	node._data[1] = gp
-	runtime.AcqureMutex(gp)
 	if tail.casNext(node) {
 		// New node added, try to move tail,
 		// if the CAS fails, another thread moved it.
@@ -161,7 +169,6 @@ func (c *LFChan) addNewNode(tail *node, element unsafe.Pointer, enqIdx int64) bo
 		c.casEnqIdx(enqIdx, enqIdx + 1) // help for others
 		return true
 	} else {
-		runtime.ReleaseMutex(gp)
 		// Next node is not null, help to move the tail pointer
 		c.casTail2(tail, tail._next)
 		c.casEnqIdx(enqIdx, enqIdx + 1) // help for others
@@ -180,7 +187,6 @@ func (c *LFChan) storeContinuation(node *node, indexInNode int32, enqIdx int64, 
 	// Slot `index` is claimed, try to store the continuation and the element (in this order!) to it.
 	// Can fail if another thread marked this slot as broken, return `false` in this case.
 	gp := runtime.GetGoroutine()
-	runtime.AcqureMutex(gp)
 	node._data[indexInNode * 2 + 1] = gp
 
 	if atomic.CompareAndSwapPointer(&node._data[indexInNode * 2], nil, element) {
@@ -188,7 +194,6 @@ func (c *LFChan) storeContinuation(node *node, indexInNode int32, enqIdx int64, 
 		return true
 	} else {
 		// The slot is broken, clean it and return `false`
-		runtime.ReleaseMutex(gp)
 		node._data[indexInNode * 2 + 1] = takenGoroutine
 		return false
 	}
@@ -198,7 +203,7 @@ func (c *LFChan) storeContinuation(node *node, indexInNode int32, enqIdx int64, 
 // specified index and resume it. Returns `true` on success, `false` otherwise.
 func (c *LFChan) tryResumeContinuation(head *node, indexInNode int32, deqIdx int64, element unsafe.Pointer) bool {
 	// Try to move 'deqIdx' forward, return `false` if fails
-	if c.casDeqIdx(deqIdx, deqIdx+ 1) {
+	if c.casDeqIdx(deqIdx, deqIdx + 1) {
 		// Get a continuation at the specified index and resume it
 		gp := head._data[indexInNode * 2 + 1]
 
@@ -206,8 +211,6 @@ func (c *LFChan) tryResumeContinuation(head *node, indexInNode int32, deqIdx int
 		head._data[indexInNode * 2 + 1] = takenGoroutine
 
 		runtime.SetGParam(gp, element)
-		runtime.AcqureMutex(gp)
-		runtime.ReleaseMutex(gp)
 		runtime.UnparkUnsafe(gp)
 		return true
 	} else {
@@ -278,14 +281,13 @@ func newNode(id int64) *node {
 	return &node{
 		id: id,
 		_next: nil,
-		_data: make([]unsafe.Pointer, segmentSize * 2),
 	}
 }
 
 type node struct {
 	id          int64
 	_next       unsafe.Pointer
-	_data       []unsafe.Pointer
+	_data       [segmentSize * 2]unsafe.Pointer
 }
 
 func (n *node) next() unsafe.Pointer {
