@@ -29,11 +29,13 @@ func BenchmarkNN(b *testing.B) {
 					} else {
 						algo = "golang"
 					}
-					b.Run(fmt.Sprintf("algo=%s, withSelect=%t, channels=%d, goroutines=%d, parallelism=%d",
-						algo, withSelect, channels, goroutines, parallelism),
-						func(b *testing.B) {
-							runBenchmark(b, producers, consumers, channels, parallelism, withSelect, true)
-						})
+					for times := 0; times < 10; times++ {
+						b.Run(fmt.Sprintf("algo=%s/withSelect=%t/channels=%d/goroutines=%d/parallelism=%d",
+							algo, withSelect, channels, goroutines, parallelism),
+							func(b *testing.B) {
+								runBenchmark(b, producers, consumers, channels, parallelism, withSelect, true)
+							})
+					}
 				}
 			}
 		}
@@ -102,7 +104,6 @@ func runWithOneChannelGo(b *testing.B, wg *sync.WaitGroup, producers int, consum
 				} else {
 					<- c
 				}
-
 			}
 		}()
 	}
