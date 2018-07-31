@@ -138,7 +138,6 @@ func runWithOneChannelKoval(b *testing.B, wg *sync.WaitGroup, producers int, con
 							action: func (result unsafe.Pointer) {},
 						},
 					)
-					b.Fatal("Unsupported")
 				} else {
 					c.SendInt(j)
 				}
