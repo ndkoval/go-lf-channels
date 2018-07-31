@@ -275,7 +275,7 @@ func (c *LFChan) casDeqIdx(old int64, new int64) bool {
 var takenGoroutine = (unsafe.Pointer) ((uintptr) (1))
 var takenElement = (unsafe.Pointer) ((uintptr) (2))
 var receiverElement = (unsafe.Pointer) ((uintptr) (3))
-const segmentSize = 64
+const segmentSize = 32
 
 func newNode(id int64) *node {
 	return &node{
