@@ -4,8 +4,8 @@ import (
 	"testing"
 	"sync"
 	"fmt"
-	"unsafe"
 	"runtime"
+	"unsafe"
 )
 
 func BenchmarkN1(b *testing.B) {
@@ -13,8 +13,9 @@ func BenchmarkN1(b *testing.B) {
 }
 
 const kovalAlgo = true
+const spin = 3000
 func BenchmarkNN(b *testing.B) {
-	for _, withSelect := range [1]bool{false} {
+	for _, withSelect := range [2]bool{false, true} {
 		for _, channels := range contentionFactor {
 			for _, goroutines := range goroutines {
 				for _, parallelism := range parallelism {
@@ -23,15 +24,21 @@ func BenchmarkNN(b *testing.B) {
 						producers = (parallelism + 1) / 2 // round up
 					}
 					consumers := producers // N:N case
-					var algo string
-					if kovalAlgo {
-						algo = fmt.Sprintf("k_spin%d_segm%d",spin, segmentSize)
-					} else {
-						algo = "golang"
+					//var algo string
+					//if kovalAlgo {
+					//	algo = fmt.Sprintf("k_spin%d_segm%d",spin, segmentSize)
+					//} else {
+					//	algo = "golang"
+					//}
+					// Warm-up at first
+					for times := 0; times < 2; times++ {
+						runBenchmark(b, producers, consumers, channels, parallelism, withSelect, kovalAlgo)
 					}
+					// Then run benchmarks
 					for times := 0; times < 10; times++ {
-						b.Run(fmt.Sprintf("algo=%s/withSelect=%t/channels=%d/goroutines=%d/parallelism=%d",
-							algo, withSelect, channels, goroutines, parallelism),
+						runtime.GC()
+						b.Run(fmt.Sprintf("withSelect=%t/channels=%d/goroutines=%d/parallelism=%d",
+							withSelect, channels, goroutines, parallelism),
 							func(b *testing.B) {
 								runBenchmark(b, producers, consumers, channels, parallelism, withSelect, kovalAlgo)
 							})
@@ -70,21 +77,21 @@ func runBenchmark(b *testing.B, producers int, consumers int, channels int, para
 }
 
 func runWithOneChannelGo(b *testing.B, wg *sync.WaitGroup, producers int, consumers int, n int, withSelect bool) {
-	c := make(chan unsafe.Pointer)
+	c := make(chan int)
 	// Run producers
 	for i := 0; i < producers; i++ {
-		var dummyChan chan unsafe.Pointer
-		if withSelect { dummyChan = make(chan unsafe.Pointer) }
+		var dummyChan chan int
+		if withSelect { dummyChan = make(chan int) }
 		go func() {
 			defer wg.Done()
 			for j := 0; j < n / producers; j++ {
 				if withSelect {
 					select {
-					case c <- (unsafe.Pointer)((uintptr)(j)): { /* do nothing */ }
+					case c <- j: { /* do nothing */ }
 					case <- dummyChan: { /* do nothing */ }
 					}
 				} else {
-					c <- (unsafe.Pointer)((uintptr)(j))
+					c <- j
 				}
 			}
 		}()
@@ -94,8 +101,8 @@ func runWithOneChannelGo(b *testing.B, wg *sync.WaitGroup, producers int, consum
 		go func() {
 			defer wg.Done()
 			for j := 0; j < n / consumers; j++ {
-				var dummyChan chan unsafe.Pointer
-				if withSelect { dummyChan = make(chan unsafe.Pointer) }
+				var dummyChan chan int
+				if withSelect { dummyChan = make(chan int) }
 				if withSelect {
 					select {
 					case <- c: { /* do nothing */ }
@@ -109,7 +116,6 @@ func runWithOneChannelGo(b *testing.B, wg *sync.WaitGroup, producers int, consum
 	}
 }
 
-const spin = 1000
 func runWithOneChannelKoval(b *testing.B, wg *sync.WaitGroup, producers int, consumers int, n int, withSelect bool) {
 	c := NewLFChan(spin)
 	// Run producers
@@ -195,9 +201,10 @@ func goroutinesFactor() int {
 	return res
 }
 
-const minBatchSize = 50000
-//var parallelism = []int{1, 2, 4, 6, 8, 12, 16, 18, 24, 32, 36, 48, 64, 72, 96, 108, 128, 144}
-var parallelism = []int{1, 2, 4, 6}
-var contentionFactor = []int{1, 2, 4, 8, 16, 32}
+const minBatchSize = 100000
+var parallelism = []int{1, 2, 4, 6, 8, 12, 16, 18, 24, 32, 36, 48, 64, 72, 96, 108, 128, 144}
+//var parallelism = []int{1, 2, 4, 6}
+//var contentionFactor = []int{1, 2, 4, 8, 16, 32}
+var contentionFactor = []int{1}
 //var goroutines = []int{0, goroutinesFactor(), goroutinesFactor() * 10, goroutinesFactor() * 100}
-var goroutines = []int{0, goroutinesFactor(), goroutinesFactor() * 10}
+var goroutines = []int{0}
