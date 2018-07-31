@@ -33,7 +33,7 @@ func BenchmarkNN(b *testing.B) {
 						b.Run(fmt.Sprintf("algo=%s/withSelect=%t/channels=%d/goroutines=%d/parallelism=%d",
 							algo, withSelect, channels, goroutines, parallelism),
 							func(b *testing.B) {
-								runBenchmark(b, producers, consumers, channels, parallelism, withSelect, true)
+								runBenchmark(b, producers, consumers, channels, parallelism, withSelect, kovalAlgo)
 							})
 					}
 				}
@@ -114,12 +114,24 @@ func runWithOneChannelKoval(b *testing.B, wg *sync.WaitGroup, producers int, con
 	c := NewLFChan(spin)
 	// Run producers
 	for i := 0; i < producers; i++ {
-		//var dummyChan *LFChan
-		//if withSelect { dummyChan = NewLFChan(spin) }
+		var dummyChan *LFChan
+		if withSelect { dummyChan = NewLFChan(spin) }
 		go func() {
 			defer wg.Done()
 			for j := 0; j < n / producers; j++ {
 				if withSelect {
+					Select(
+						SelectAlternative{
+							channel: c,
+							element: IntToUnsafePointer(j),
+							action: func (result unsafe.Pointer) {},
+						},
+						SelectAlternative{
+							channel: dummyChan,
+							element: ReceiverElement,
+							action: func (result unsafe.Pointer) {},
+						},
+					)
 					b.Fatal("Unsupported")
 				} else {
 					c.SendInt(j)
@@ -132,10 +144,21 @@ func runWithOneChannelKoval(b *testing.B, wg *sync.WaitGroup, producers int, con
 		go func() {
 			defer wg.Done()
 			for j := 0; j < n / consumers; j++ {
-				//var dummyChan *LFChan
-				//if withSelect { dummyChan = NewLFChan(spin) }
+				var dummyChan *LFChan
+				if withSelect { dummyChan = NewLFChan(spin) }
 				if withSelect {
-					b.Fatal("Unsupported")
+					Select(
+						SelectAlternative{
+							channel: c,
+							element: ReceiverElement,
+							action: func (result unsafe.Pointer) {},
+						},
+						SelectAlternative{
+							channel: dummyChan,
+							element: ReceiverElement,
+							action: func (result unsafe.Pointer) {},
+						},
+					)
 				} else {
 					c.Receive()
 				}

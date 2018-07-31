@@ -79,8 +79,12 @@ func TestStressGo(t *testing.T) {
 	wg.Wait()
 }
 
+func IntToUnsafePointer(x int) unsafe.Pointer {
+	return (unsafe.Pointer)((uintptr)(x + 100))
+}
+
 func (c *LFChan) SendInt(element int) {
-	c.Send((unsafe.Pointer)((uintptr)(element + 100)))
+	c.Send(IntToUnsafePointer(element))
 }
 
 func (c *LFChan) ReceiveInt() int {

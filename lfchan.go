@@ -36,7 +36,7 @@ func (c *LFChan) Send(element unsafe.Pointer) {
 }
 
 func (c *LFChan) Receive() unsafe.Pointer {
-	return c.sendOrReceiveSuspend(receiverElement)
+	return c.sendOrReceiveSuspend(ReceiverElement)
 }
 
 func (c* LFChan) sendOrReceiveSuspend(element unsafe.Pointer) unsafe.Pointer {
@@ -72,21 +72,21 @@ func (c* LFChan) sendOrReceiveSuspend(element unsafe.Pointer) unsafe.Pointer {
 				continue try_again
 			}
 			// Decide should we make a rendezvous or not
-			makeRendezvous := (element == receiverElement && firstElement != receiverElement) || (element != receiverElement && firstElement == receiverElement)
-			//deqIdxLimit := enqIdx
+			makeRendezvous := (element == ReceiverElement && firstElement != ReceiverElement) || (element != ReceiverElement && firstElement == ReceiverElement)
+			deqIdxLimit := enqIdx
 			if makeRendezvous {
 				if c.tryResumeContinuation(head, deqIdxInNode, deqIdx, element) {
 					return firstElement
 				} else { continue try_again }
 			} else {
-				//for {
+				for {
 					if c.addToWaitingQueue(enqIdx, element) {
 						return parkAndThenReturn(element)
 					} else { continue try_again }
-					//enqIdx = c.enqIdx()
-					//deqIdx = c.deqIdx()
-					//if deqIdx >= deqIdxLimit { continue try_again }
-				//}
+					enqIdx = c.enqIdx()
+					deqIdx = c.deqIdx()
+					if deqIdx >= deqIdxLimit { continue try_again }
+				}
 			}
 		}
 	}
@@ -235,7 +235,7 @@ func nodeId(index int64) int64 {
 }
 
 func parkAndThenReturn(sendElement unsafe.Pointer) unsafe.Pointer {
-	if sendElement == receiverElement {
+	if sendElement == ReceiverElement {
 		runtime.ParkReceiveAndReleaseUnsafe()
 	} else {
 		runtime.ParkSendAndReleaseUnsafe()
@@ -274,7 +274,7 @@ func (c *LFChan) casDeqIdx(old int64, new int64) bool {
 
 var takenGoroutine = (unsafe.Pointer) ((uintptr) (1))
 var takenElement = (unsafe.Pointer) ((uintptr) (2))
-var receiverElement = (unsafe.Pointer) ((uintptr) (3))
+var ReceiverElement = (unsafe.Pointer) ((uintptr) (3))
 const segmentSize = 64
 
 func newNode(id int64) *node {
@@ -300,4 +300,17 @@ func (n *node) getNext() *node {
 
 func (n *node) casNext(newNext *node) bool {
 	return atomic.CompareAndSwapPointer(&n._next, nil, (unsafe.Pointer) (newNext))
+}
+
+
+// === SELECT ===
+
+type SelectAlternative struct {
+	channel *LFChan
+	element unsafe.Pointer
+	action  func(result unsafe.Pointer)
+}
+
+func Select(alternatives ...SelectAlternative)  {
+	
 }
