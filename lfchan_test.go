@@ -4,6 +4,7 @@ import (
 	"testing"
 	"sync"
 	"unsafe"
+	"time"
 )
 
 func TestSimple(t *testing.T) {
@@ -217,6 +218,101 @@ func TestStressSelects(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+
+func TestStressBothSendAndReceiveSelect(t *testing.T) {
+	n := 500000
+	k := 2
+	c1 := NewLFChan(300)
+	c2 := NewLFChan(300)
+	wg := sync.WaitGroup{}
+	// Run sender
+	//for sender := 0; sender < k; sender++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < n * k; i++ {
+				SelectUnbiased(
+					SelectAlternative{
+						channel: c1,
+						element: IntToUnsafePointer(i),
+						action: func (result unsafe.Pointer) {},
+					},
+					SelectAlternative{
+						channel: c2,
+						element: IntToUnsafePointer(i),
+						action: func (result unsafe.Pointer) {},
+					},
+				)
+			}
+		}()
+	//}
+	// Run receiver
+	for receiver := 0; receiver < k; receiver++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < n; i++ {
+				SelectUnbiased(
+					SelectAlternative{
+						channel: c1,
+						element: ReceiverElement,
+						action: func (result unsafe.Pointer) {},
+					},
+					SelectAlternative{
+						channel: c2,
+						element: ReceiverElement,
+						action: func (result unsafe.Pointer) {},
+					},
+				)
+			}
+		}()
+	}
+	//for {
+	//	time.Sleep(3 * time.Second)
+	//	pprof.Lookup("goroutine").WriteTo(os.Stdout, 1)
+	//}
+	wg.Wait()
+}
+
+func TestCancellation(t *testing.T) {
+	c := NewLFChan(300)
+	dummy := NewLFChan(300)
+	n := 10000
+	k := 100
+	// Run parallel receiver with selecting on dummy channel as well.
+	for i := 0; i < k; i++ {
+		go func() {
+			for j := 0; j < n; j++ {
+				SelectUnbiased(
+					SelectAlternative{
+						channel: c,
+						element: ReceiverElement,
+						action: func (result unsafe.Pointer) {},
+					},
+					SelectAlternative{
+						channel: dummy,
+						element: ReceiverElement,
+						action: func (result unsafe.Pointer) { t.Fatal("Impossible") },
+					},
+				)
+			}
+		}()
+	}
+	// Send n*k elements to the channel
+	for i := 0; i < n * k; i++ {
+		c.SendInt(1)
+	}
+	// After this all nodes except for head and tail should be removed from
+	// the dummy channel. Wait for a bit at first.
+	time.Sleep(500 * time.Millisecond)
+	head := dummy.getHead()
+	headNext, _ := head.readNext()
+	tail := dummy.getTail()
+	if head == tail || headNext == tail { return }
+	println(IntType(head._next) == removedAndNextType)
+	t.Fatal("Channel contains empy nodes which are niether head or tail")
 }
 
 func IntToUnsafePointer(x int) unsafe.Pointer {

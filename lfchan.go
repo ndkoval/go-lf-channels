@@ -8,7 +8,7 @@ import (
 )
 
 func NewLFChan(spinThreshold int) *LFChan {
-	emptyNode := (unsafe.Pointer) (newNode(0))
+	emptyNode := (unsafe.Pointer) (newNode(0, nil))
 	return &LFChan{
 		spinThreshold: spinThreshold,
 		_deqIdx: 1,
@@ -32,17 +32,81 @@ type node struct {
 	id          int64
 	_next       unsafe.Pointer
 	_data       [segmentSize * 2]unsafe.Pointer
+	_cleaned int32
+	_prev 		unsafe.Pointer
 }
 
-func newNode(id int64) *node {
+const removedAndNextType int32 = 876398457
+type removedAndNext struct {
+	__type int32
+	node *node
+}
+
+func newNode(id int64, prev *node) *node {
 	return &node{
 		id: id,
 		_next: nil,
 	}
 }
 
+func clean(node *node, index int32) {
+	if true { return } // todo remove this line
+	cont := node.readContinuation(index)
+	if cont == takenContinuation { return }
+	if !node.casContinuation(index, cont, takenContinuation) { return }
+	atomic.StorePointer(&node._data[index * 2], takenElement)
+	if atomic.AddInt32(&node._cleaned, 1) < segmentSize { return }
+	// Remove the node
+	node.removeLogically()
+	node.removePhysically()
+}
+
+func (n *node) removeLogically() {
+	for {
+		nextNode := n.next()
+		var newNextNode unsafe.Pointer
+		if nextNode == nil {
+			newNextNode = removedTail
+		} else {
+			newNextNode = unsafe.Pointer(&removedAndNext{
+				__type: removedAndNextType,
+				node:   (*node) (nextNode),
+			})
+		}
+		if n.casNext(nextNode, newNextNode) { return }
+	}
+}
+
+func (n *node) removePhysically() {
+	for {
+		prev := n.prev()
+		var prevNext unsafe.Pointer
+		var prevNextNode *node
+		var prevRemoved bool
+		for {
+			if prev == nil {
+				return
+			}
+			prevNext := prev.next()
+			prevNextNode, prevRemoved = readNext(prevNext)
+			if prevRemoved {
+				prev = prev.prev()
+			} else {
+				break
+			}
+		}
+		next, _ := n.readNext()
+		if prevNextNode == next { return }
+		if !prev.casNext(prevNext, unsafe.Pointer(next)) { continue }
+		_, nextRemoved := next.readNext()
+		if nextRemoved { next.removePhysically() }
+		return
+	}
+}
+
 var takenContinuation = (unsafe.Pointer) ((uintptr) (1))
 var takenElement = (unsafe.Pointer) ((uintptr) (2))
+var removedTail = unsafe.Pointer(uintptr(3))
 var ReceiverElement = (unsafe.Pointer) ((uintptr) (4096))
 const segmentSize = 32
 
@@ -63,13 +127,18 @@ func (c* LFChan) sendOrReceiveSuspend(element unsafe.Pointer) unsafe.Pointer {
 		if enqIdx < deqIdx { continue try_again }
 		// Check if queue is empty
 		if deqIdx == enqIdx {
-			if c.addToWaitingQueue(enqIdx, element, gp) {
+			addSuccess, _ := c.addToWaitingQueue(enqIdx, element, gp)
+			if addSuccess {
 				return parkAndThenReturn()
 			} else { continue try_again }
 		} else {
 			// Queue is not empty
 			head := c.getHead()
 			headId := head.id
+			if deqIdx < segmentSize * headId {
+				c.casDeqIdx(deqIdx, segmentSize * headId)
+				continue try_again
+			}
 			deqIdxNodeId := nodeId(deqIdx)
 			// Check that deqIdx is not outdated
 			if headId > deqIdxNodeId {
@@ -77,7 +146,9 @@ func (c* LFChan) sendOrReceiveSuspend(element unsafe.Pointer) unsafe.Pointer {
 			}
 			// Check that head pointer should be moved forward
 			if headId < deqIdxNodeId {
-				c.casHead(head, head.next())
+				headNext, _ := head.readNext()
+				c.casHead(head, unsafe.Pointer(headNext))
+				headNext._prev = nil
 				continue try_again
 			}
 			// Read the first element
@@ -97,7 +168,8 @@ func (c* LFChan) sendOrReceiveSuspend(element unsafe.Pointer) unsafe.Pointer {
 				} else { continue try_again }
 			} else {
 				for {
-					if c.addToWaitingQueue(enqIdx, element, gp) {
+					addSuccess, _ := c.addToWaitingQueue(enqIdx, element, gp)
+					if addSuccess {
 						return parkAndThenReturn()
 					} else { continue try_again }
 					enqIdx = c.enqIdx()
@@ -136,8 +208,7 @@ func (c *LFChan) readElement(node *node, index int32) unsafe.Pointer {
 	}
 }
 
-
-func (c *LFChan) addToWaitingQueue(enqIdx int64, element unsafe.Pointer, cont unsafe.Pointer) bool {
+func (c *LFChan) addToWaitingQueue(enqIdx int64, element unsafe.Pointer, cont unsafe.Pointer) (bool, RegInfo) {
 	// Count enqIdx parts
 	enqIdxNodeId := nodeId(enqIdx)
 	enqIdxInNode := indexInNode(enqIdx)
@@ -145,51 +216,67 @@ func (c *LFChan) addToWaitingQueue(enqIdx int64, element unsafe.Pointer, cont un
 	tail := c.getTail()
 	tailId := tail.id
 	// Check if enqIdx is not outdated
-	if tailId > enqIdxNodeId { return false }
+	if tailId > enqIdxNodeId { return false, RegInfo{} }
 	// Check if we should help with a new node adding
 	if tailId == enqIdxNodeId && enqIdxInNode == 0 {
 		c.casEnqIdx(enqIdx, enqIdx + 1)
-		return false
+		return false, RegInfo{}
 	}
 	// Check if a new node should be added
 	if tailId == enqIdxNodeId - 1 && enqIdxInNode == 0 {
-		return c.addNewNode(tail, element, enqIdx, cont)
+		success, node := c.addNewNode(tail, element, enqIdx, cont)
+		if success {
+			return true, RegInfo{node: node, index: 0}
+		}  else { return false, RegInfo{} }
 	}
 	// Just check that `enqIdx` is valid and try to store the current
 	// goroutine into the `tail` by `enqIdxInNode`
 	if tailId != enqIdxNodeId { panic("Impossible!") }
 	if enqIdxInNode == 0 { panic("Impossible 2!") }
-	return c.storeContinuation(tail, enqIdxInNode, enqIdx, element, cont)
+	if c.storeContinuation(tail, enqIdxInNode, enqIdx, element, cont) {
+		return true, RegInfo{node: tail, index: enqIdxInNode}
+	} else { return false, RegInfo{} }
 }
 
 // Tries to read an element from the specified node
 // at the specified index. Returns the read element or
 // marks the slot as broken (sets `TAKEN_ELEMENT` to the slot)
 // and returns `TAKEN_ELEMENT` if the element is unavailable.
-func (c *LFChan) addNewNode(tail *node, element unsafe.Pointer, enqIdx int64, cont unsafe.Pointer) bool {
-	// If next node is not null, help to move the tail pointer
-	tailNext := tail.getNext()
-	if tailNext != nil {
-		// If this CAS fails, another thread moved the tail pointer
-		c.casTail(tail, tailNext)
-		c.casEnqIdx(enqIdx, enqIdx + 1) // help
-		return false
-	}
-	// Create a new node with this continuation and element and try to add it
-	node := newNode(tail.id + 1)
-	node._data[0] = element
-	node._data[1] = cont
-	if tail.casNext(node) {
-		// New node added, try to move tail,
-		// if the CAS fails, another thread moved it.
-		c.casTail(tail, node)
-		c.casEnqIdx(enqIdx, enqIdx + 1) // help for others
-		return true
-	} else {
-		// Next node is not null, help to move the tail pointer
-		c.casTail2(tail, tail._next)
-		c.casEnqIdx(enqIdx, enqIdx + 1) // help for others
-		return false
+func (c *LFChan) addNewNode(tail *node, element unsafe.Pointer, enqIdx int64, cont unsafe.Pointer) (bool, *node) {
+	for {
+		// If next node is not null, help to move the tail pointer
+		tailNext := tail.next()
+		tailNextNode, tailRemoved := readNext(tailNext)
+		if tailNextNode != nil {
+			// If this CAS fails, another thread moved the tail pointer
+			c.casTail(tail, tailNextNode)
+			c.casEnqIdx(enqIdx, enqIdx+1) // help
+			return false, nil
+		}
+		// Create a new node with this continuation and element and try to add it
+		newTail := newNode(tail.id + 1, tail)
+		newTail._data[0] = element
+		newTail._data[1] = cont
+		var newTailNext unsafe.Pointer
+		if tailRemoved {
+			newTailNext = unsafe.Pointer(&removedAndNext{
+				__type: removedAndNextType,
+				node:   newTail,
+			})
+		} else {
+			newTailNext = unsafe.Pointer(newTail)
+		}
+		if tail.casNext(tailNext, newTailNext) {
+			// New node added, try to move tail,
+			// if the CAS fails, another thread moved it.
+			c.casTail(tail, newTail)
+			c.casEnqIdx(enqIdx, enqIdx+1) // help for others
+			// Remove the previous tail from the waiting queue
+			// if it was marked as logically removed.
+			if tailRemoved { tail.removePhysically() }
+			// Success, return true.
+			return true, newTail
+		} else { continue }
 	}
 }
 
@@ -233,7 +320,7 @@ func (c *LFChan) tryResumeContinuation(head *node, indexInNode int32, deqIdx int
 	contType := IntType(cont)
 	if contType == SelectInstanceType {
 		selectInstance := (*SelectInstance) (cont)
-		if !selectInstance.trySelect2(unsafe.Pointer(c)) { return false }
+		if !selectInstance.trySetDescriptor(unsafe.Pointer(c)) { return false }
 		runtime.SetGParam(selectInstance.gp, element)
 		runtime.UnparkUnsafe(selectInstance.gp)
 		return true
@@ -243,6 +330,8 @@ func (c *LFChan) tryResumeContinuation(head *node, indexInNode int32, deqIdx int
 		return true
 	}
 }
+
+var selectIdGen int64 = 0
 
 func (c *LFChan) tryResumeContinuationForSelect(head *node, indexInNode int32, deqIdx int64, element unsafe.Pointer, selectInstance *SelectInstance, firstElement unsafe.Pointer) bool {
 	// Set descriptor at first
@@ -263,15 +352,18 @@ func (c *LFChan) tryResumeContinuationForSelect(head *node, indexInNode int32, d
 	}
 	// Invoke selectDesc and update the continuation's cell
 	if desc.invoke() {
-		head.casContinuation(indexInNode, unsafe.Pointer(desc), takenContinuation)
+		head.setContinuation(indexInNode, takenContinuation)
 	} else {
+		if !selectInstance.isSelected() {
+			head.setContinuation(indexInNode, takenContinuation)
+			c.casDeqIdx(deqIdx, deqIdx + 1)
+			return false
+		}
 		head.casContinuation(indexInNode, unsafe.Pointer(desc), desc.cont)
 		return false
 	}
 	// Move deque index forward
 	c.casDeqIdx(deqIdx, deqIdx + 1)
-	// Change selectInstance' state
-	selectInstance.setState(unsafe.Pointer(c))
 	// Resume all continuations
 	anotherCont := desc.cont
 	var anotherG unsafe.Pointer
@@ -290,6 +382,10 @@ func (c *LFChan) tryResumeContinuationForSelect(head *node, indexInNode int32, d
 
 func (n *node) casContinuation(index int32, old, new unsafe.Pointer) bool {
 	return atomic.CompareAndSwapPointer(&n._data[index * 2 + 1], old, new)
+}
+
+func (n *node) setContinuation(index int32, cont unsafe.Pointer) {
+	atomic.StorePointer(&n._data[index * 2 + 1], cont)
 }
 
 func (n *node) readContinuation(index int32) unsafe.Pointer {
@@ -321,15 +417,17 @@ func (n *node) readContinuation(index int32) unsafe.Pointer {
 
 // === SELECT ===
 
-func (c *LFChan) regSelect(selectInstance *SelectInstance, element unsafe.Pointer) {
+func (c *LFChan) regSelect(selectInstance *SelectInstance, element unsafe.Pointer) (bool, RegInfo) {
 	try_again: for { // CAS-loop
+		if selectInstance.isSelected() { return false, RegInfo{} }
 		enqIdx := c.enqIdx()
 		deqIdx := c.deqIdx()
 		if enqIdx < deqIdx { continue try_again }
 		// Check if queue is empty
 		if deqIdx == enqIdx {
-			if c.addToWaitingQueue(enqIdx, element, unsafe.Pointer(selectInstance)) {
-				return
+			addSuccess, regInfo := c.addToWaitingQueue(enqIdx, element, unsafe.Pointer(selectInstance))
+			if addSuccess {
+				return true, regInfo
 			} else { continue try_again }
 		} else {
 			// Queue is not empty
@@ -342,7 +440,9 @@ func (c *LFChan) regSelect(selectInstance *SelectInstance, element unsafe.Pointe
 			}
 			// Check that head pointer should be moved forward
 			if headId < deqIdxNodeId {
-				c.casHead(head, head.next())
+				headNext, _ := head.readNext()
+				c.casHead(head, unsafe.Pointer(headNext))
+				headNext._prev = nil
 				continue try_again
 			}
 			// Read the first element
@@ -358,12 +458,13 @@ func (c *LFChan) regSelect(selectInstance *SelectInstance, element unsafe.Pointe
 			deqIdxLimit := enqIdx
 			if makeRendezvous {
 				if c.tryResumeContinuationForSelect(head, deqIdxInNode, deqIdx, element, selectInstance, firstElement) {
-					return
+					return false, RegInfo{}
 				} else { continue try_again }
 			} else {
 				for {
-					if c.addToWaitingQueue(enqIdx, element, unsafe.Pointer(selectInstance)) {
-						return
+					addSuccess, regInfo := c.addToWaitingQueue(enqIdx, element, unsafe.Pointer(selectInstance))
+					if addSuccess {
+						return true, regInfo
 					} else { continue try_again }
 					enqIdx = c.enqIdx()
 					deqIdx = c.deqIdx()
@@ -383,9 +484,16 @@ type SelectAlternative struct {
 const SelectInstanceType int32 = 1298498092
 type SelectInstance struct {
 	__type int32
+	id int64
 	alternatives *[]SelectAlternative
+	regInfos *[]RegInfo
 	state unsafe.Pointer
 	gp	  unsafe.Pointer // goroutine
+}
+
+type RegInfo struct {
+	node *node
+	index int32
 }
 
 const SelectDescType int32 = 2019727883
@@ -407,80 +515,65 @@ func (sd *SelectDesc) invoke() bool {
 	// Phase 1 -- set descriptor to the select's state,
 	// help for others if needed.
 	selectInstance := sd.selectInstance
-	for {
-		selectState := selectInstance.readState(sd)
-		if selectState == unsafe.Pointer(sd) { break } // set already
-		if selectState == nil {
-			if selectInstance.casState(nil, unsafe.Pointer(sd)) { break }
-		} else { // *LFChan
-			if sd.getStatus() == SUCCEEDED {
-				return true
-			} else {
+	anotherCont := sd.cont
+	anotherContType := IntType(anotherCont)
+	sdp := unsafe.Pointer(sd)
+	if anotherContType == SelectInstanceType {
+		anotherSelectInstance := (*SelectInstance) (anotherCont)
+		if selectInstance.id < anotherSelectInstance.id {
+			if !selectInstance.trySetDescriptor(sdp) || !anotherSelectInstance.trySetDescriptor(sdp) {
+				sd.setStatus(FAILED)
+				return false
+			}
+		} else {
+			if !anotherSelectInstance.trySetDescriptor(sdp) || !selectInstance.trySetDescriptor(sdp) {
 				sd.setStatus(FAILED)
 				return false
 			}
 		}
-	}
-	// Phase 2 -- try to make a rendezvous with another continuation
-	anotherCont := sd.cont
-	anotherContType := IntType(anotherCont)
-	if anotherContType == SelectInstanceType {
-		anotherSelectInstance := (*SelectInstance) (anotherCont)
-		if !anotherSelectInstance.trySelect(unsafe.Pointer(sd.channel)) {
-			state := anotherSelectInstance.getState()
-			println("XXXX ", state, "  ", sd.selectInstance, "   ", IntType(state) == SelectInstanceType)
-
+	} else {
+		if !selectInstance.trySetDescriptor(sdp) {
 			sd.setStatus(FAILED)
 			return false
 		}
 	}
 	// Phase 3 -- update descriptor's and selectInstance statuses
-	if sd.getStatus() == FAILED { return false }
 	sd.setStatus(SUCCEEDED)
-	selectInstance.setState(unsafe.Pointer(sd.channel))
 	return true
 }
 
 
-func (s *SelectInstance) readState(allowedDesc *SelectDesc) unsafe.Pointer {
+func (s *SelectInstance) readState(allowedUnprocessedDesc unsafe.Pointer) unsafe.Pointer {
 	for {
 		// Read state
 		state := s.getState()
 		// Check if state is `nil` or `*LFChan` and return it in this case
-		if state == nil { return nil }
+		if state == nil || state == allowedUnprocessedDesc {
+			return state
+		}
 		stateType := IntType(state)
 		if stateType != SelectDescType {
 			return state
 		}
+		// If this SelectDesc is allowed return it
 		// State is SelectDesc, help it
 		desc := (*SelectDesc) (state)
-		// If this SelectDesc is allowed return it
-		if desc == allowedDesc { return state }
 		// Try to help with the found descriptor processing
 		// and update state
 		if desc.invoke() {
-			s.setState(unsafe.Pointer(desc.channel))
-			return unsafe.Pointer(desc.channel)
+			return state
 		} else {
 			if s.casState(state, nil) { return nil }
 		}
 	}
 }
 
-func (s *SelectInstance) trySelect(channel unsafe.Pointer) bool {
+func (s *SelectInstance) trySetDescriptor(desc unsafe.Pointer) bool {
 	for {
-		state := s.readState(nil)
-		if state == channel { return true }
+		state := s.readState(desc)
+		if state == desc { return true }
 		if state != nil { return false }
-		if s.casState(nil, unsafe.Pointer(channel)) { return true }
-	}
-}
-
-func (s *SelectInstance) trySelect2(channel unsafe.Pointer) bool {
-	for {
-		state := s.readState(nil)
-		if state != nil { return false }
-		if s.casState(nil, unsafe.Pointer(channel)) { return true }
+		if s.casState(nil, desc) { return true }
 	}
 }
 
@@ -489,14 +582,10 @@ func (s *SelectInstance) getState() unsafe.Pointer {
 }
 
 func (s *SelectInstance) setState(state unsafe.Pointer) {
-	stateType := IntType(state)
-	if stateType == SelectInstanceType { panic("WTF?!!") }
 	atomic.StorePointer(&s.state, state)
 }
 
 func (s *SelectInstance) casState(old, new unsafe.Pointer) bool{
-	stateType := IntType(new)
-	if stateType == SelectInstanceType { panic("WTF?!!") }
 	return atomic.CompareAndSwapPointer(&s.state, old, new)
 }
 
@@ -516,7 +605,9 @@ func SelectUnbiased(alternatives ...SelectAlternative) {
 func selectImpl(alternatives *[]SelectAlternative) {
 	selectInstance := &SelectInstance {
 		__type: SelectInstanceType,
+		id: atomic.AddInt64(&selectIdGen, 1),
 		alternatives: alternatives,
+		regInfos: &([]RegInfo{}),
 		state: nil,
 		gp: runtime.GetGoroutine(),
 	}
@@ -532,10 +623,7 @@ func shuffleAlternatives(alternatives *[]SelectAlternative) {
 }
 
 func (s *SelectInstance) isSelected() bool {
-	state := s.state
-	if state == nil { return false }
-	if IntType(state) == SelectDescType { return false }
-	return true
+	return s.readState(nil) != nil
 }
 
 // Does select in 3-phase way. At first it selects
@@ -551,11 +639,24 @@ func (s *SelectInstance) doSelect() {
 
 func (s *SelectInstance) selectAlternative() (unsafe.Pointer, SelectAlternative) {
 	for _, alt := range *(s.alternatives) {
-		alt.channel.regSelect(s, alt.element)
+		added, regInfo := alt.channel.regSelect(s, alt.element)
+		if added {
+			c := make([]RegInfo, len(*s.regInfos))
+			copy(c, *s.regInfos)
+			c = append(c, regInfo)
+			s.regInfos = &c
+		}
 		if s.isSelected() { break }
 	}
 	result := parkAndThenReturn()
-	alternative := s.findAlternative((*LFChan)(s.state))
+	selectState := s.state
+	var channel *LFChan
+	if IntType(selectState) == SelectDescType {
+		channel = (*LFChan) ((*SelectDesc) (selectState).channel)
+	} else {
+		channel = (*LFChan) (selectState)
+	}
+	alternative := s.findAlternative(channel)
 	return result, alternative
 }
 
@@ -579,7 +680,9 @@ func (s *SelectInstance) findAlternative(channel *LFChan) SelectAlternative {
 }
 
 func (s *SelectInstance) cancelNonSelectedAlternatives() {
-	// TODO implement me, please, please
+	for _, ri := range *s.regInfos {
+		clean(ri.node, ri.index)
+	}
 }
 
 
@@ -647,10 +750,27 @@ func (n *node) next() unsafe.Pointer {
 	return atomic.LoadPointer(&n._next)
 }
 
-func (n *node) getNext() *node {
-	return (*node) (atomic.LoadPointer(&n._next))
+func (n *node) casNext(old, new unsafe.Pointer) bool {
+	return atomic.CompareAndSwapPointer(&n._next, old, new)
 }
 
-func (n *node) casNext(newNext *node) bool {
-	return atomic.CompareAndSwapPointer(&n._next, nil, (unsafe.Pointer) (newNext))
+func (n *node) prev() *node {
+	return (*node) (atomic.LoadPointer(&n._prev))
+}
+
+// Returns a pair (node, removed)
+func (n *node) readNext() (*node, bool) {
+	next := n.next()
+	return readNext(next)
+}
+
+func readNext(next unsafe.Pointer) (*node, bool) {
+	if next == nil { return nil, false }
+	if next == removedTail { return nil, true }
+	if IntType(next) == removedAndNextType {
+		removedAndNext := (*removedAndNext) (next)
+		return removedAndNext.node, true
+	} else {
+		return (*node) (next), false
+	}
 }
