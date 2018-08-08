@@ -222,8 +222,8 @@ func TestStressSelects(t *testing.T) {
 
 
 func TestStressBothSendAndReceiveSelect(t *testing.T) {
-	n := 500000
-	k := 2
+	n := 50000
+	k := 10
 	c1 := NewLFChan(300)
 	c2 := NewLFChan(300)
 	wg := sync.WaitGroup{}
@@ -269,10 +269,6 @@ func TestStressBothSendAndReceiveSelect(t *testing.T) {
 			}
 		}()
 	}
-	//for {
-	//	time.Sleep(3 * time.Second)
-	//	pprof.Lookup("goroutine").WriteTo(os.Stdout, 1)
-	//}
 	wg.Wait()
 }
 
@@ -280,21 +276,25 @@ func TestCancellation(t *testing.T) {
 	c := NewLFChan(300)
 	dummy := NewLFChan(300)
 	n := 10000
-	k := 100
+	k := 50
+	// Add first element to the dummy channel
+	go func() {
+		dummy.Receive()
+	}()
 	// Run parallel receiver with selecting on dummy channel as well.
 	for i := 0; i < k; i++ {
 		go func() {
 			for j := 0; j < n; j++ {
-				SelectUnbiased(
-					SelectAlternative{
-						channel: c,
-						element: ReceiverElement,
-						action: func (result unsafe.Pointer) {},
-					},
+				Select(
 					SelectAlternative{
 						channel: dummy,
 						element: ReceiverElement,
 						action: func (result unsafe.Pointer) { t.Fatal("Impossible") },
+					},
+					SelectAlternative{
+						channel: c,
+						element: ReceiverElement,
+						action: func (result unsafe.Pointer) {},
 					},
 				)
 			}
@@ -306,12 +306,12 @@ func TestCancellation(t *testing.T) {
 	}
 	// After this all nodes except for head and tail should be removed from
 	// the dummy channel. Wait for a bit at first.
-	time.Sleep(500 * time.Millisecond)
+	time.Sleep(200 * time.Millisecond)
 	head := dummy.getHead()
 	headNext, _ := head.readNext()
 	tail := dummy.getTail()
+	println(dummy._deqIdx, "   ", dummy._enqIdx)
 	if head == tail || headNext == tail { return }
-	println(IntType(head._next) == removedAndNextType)
 	t.Fatal("Channel contains empy nodes which are niether head or tail")
 }
 

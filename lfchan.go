@@ -46,17 +46,19 @@ func newNode(id int64, prev *node) *node {
 	return &node{
 		id: id,
 		_next: nil,
+		_cleaned: 0,
+		_prev: unsafe.Pointer(prev),
 	}
 }
 
 func clean(node *node, index int32) {
-	if true { return } // todo remove this line
 	cont := node.readContinuation(index)
 	if cont == takenContinuation { return }
 	if !node.casContinuation(index, cont, takenContinuation) { return }
 	atomic.StorePointer(&node._data[index * 2], takenElement)
 	if atomic.AddInt32(&node._cleaned, 1) < segmentSize { return }
 	// Remove the node
+	if node.prev() == nil { return } // do not remove head
 	node.removeLogically()
 	node.removePhysically()
 }
@@ -87,7 +89,7 @@ func (n *node) removePhysically() {
 			if prev == nil {
 				return
 			}
-			prevNext := prev.next()
+			prevNext = prev.next()
 			prevNextNode, prevRemoved = readNext(prevNext)
 			if prevRemoved {
 				prev = prev.prev()
@@ -97,16 +99,20 @@ func (n *node) removePhysically() {
 		}
 		next, _ := n.readNext()
 		if prevNextNode == next { return }
-		if !prev.casNext(prevNext, unsafe.Pointer(next)) { continue }
-		_, nextRemoved := next.readNext()
-		if nextRemoved { next.removePhysically() }
+		if !prev.casNext(prevNext, unsafe.Pointer(next)) {
+			continue
+		}
+		if next != nil {
+			_, nextRemoved := next.readNext()
+			if nextRemoved { next.removePhysically() }
+		}
 		return
 	}
 }
 
 var takenContinuation = (unsafe.Pointer) ((uintptr) (1))
 var takenElement = (unsafe.Pointer) ((uintptr) (2))
-var removedTail = unsafe.Pointer(uintptr(3))
+var removedTail = unsafe.Pointer(uintptr(4097))
 var ReceiverElement = (unsafe.Pointer) ((uintptr) (4096))
 const segmentSize = 32
 
@@ -147,6 +153,7 @@ func (c* LFChan) sendOrReceiveSuspend(element unsafe.Pointer) unsafe.Pointer {
 			// Check that head pointer should be moved forward
 			if headId < deqIdxNodeId {
 				headNext, _ := head.readNext()
+				atomic.StorePointer(&headNext._prev, nil)
 				c.casHead(head, unsafe.Pointer(headNext))
 				headNext._prev = nil
 				continue try_again
@@ -441,6 +448,7 @@ func (c *LFChan) regSelect(selectInstance *SelectInstance, element unsafe.Pointe
 			// Check that head pointer should be moved forward
 			if headId < deqIdxNodeId {
 				headNext, _ := head.readNext()
+				atomic.StorePointer(&headNext._prev, nil)
 				c.casHead(head, unsafe.Pointer(headNext))
 				headNext._prev = nil
 				continue try_again
@@ -713,11 +721,6 @@ func (c *LFChan) casTail(oldTail *node, newTail *node) bool {
 	return atomic.CompareAndSwapPointer(&c._tail, (unsafe.Pointer) (oldTail), (unsafe.Pointer) (newTail))
 }
 
-// Fuck this language
-func (c *LFChan) casTail2(oldTail *node, newTail unsafe.Pointer) bool {
-	return atomic.CompareAndSwapPointer(&c._tail, (unsafe.Pointer) (oldTail), newTail)
-}
-
 func (c *LFChan) getTail() *node {
 	return (*node) (atomic.LoadPointer(&c._tail))
 }
@@ -760,17 +763,17 @@ func (n *node) prev() *node {
 
 // Returns a pair (node, removed)
 func (n *node) readNext() (*node, bool) {
-	next := n.next()
-	return readNext(next)
+	nextPointer := n.next()
+	return readNext(nextPointer)
 }
 
-func readNext(next unsafe.Pointer) (*node, bool) {
-	if next == nil { return nil, false }
-	if next == removedTail { return nil, true }
-	if IntType(next) == removedAndNextType {
-		removedAndNext := (*removedAndNext) (next)
+func readNext(nextPointer unsafe.Pointer) (*node, bool) {
+	if nextPointer == nil { return nil, false }
+	if nextPointer == removedTail { return nil, true }
+	if IntType(nextPointer) == removedAndNextType {
+		removedAndNext := (*removedAndNext) (nextPointer)
 		return removedAndNext.node, true
 	} else {
-		return (*node) (next), false
+		return (*node) (nextPointer), false
 	}
 }
