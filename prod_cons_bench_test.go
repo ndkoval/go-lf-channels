@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"runtime"
 	"unsafe"
+	"os"
 )
 
 func BenchmarkN1(b *testing.B) {
@@ -13,35 +14,39 @@ func BenchmarkN1(b *testing.B) {
 }
 
 const kovalAlgo = true
-const spin = 3000
 func BenchmarkNN(b *testing.B) {
-	for _, withSelect := range [2]bool{false, true} {
-		for _, channels := range contentionFactor {
-			for _, goroutines := range goroutines {
-				for _, parallelism := range parallelism {
-					producers := goroutines / (channels * 2)
-					if producers == 0 {
-						producers = (parallelism + 1) / 2 // round up
-					}
-					consumers := producers // N:N case
-					//var algo string
-					//if kovalAlgo {
-					//	algo = fmt.Sprintf("k_spin%d_segm%d",spin, segmentSize)
-					//} else {
-					//	algo = "golang"
-					//}
-					// Warm-up at first
-					for times := 0; times < 2; times++ {
-						runBenchmark(b, producers, consumers, channels, parallelism, withSelect, kovalAlgo)
-					}
-					// Then run benchmarks
-					for times := 0; times < 10; times++ {
-						runtime.GC()
-						b.Run(fmt.Sprintf("withSelect=%t/channels=%d/goroutines=%d/parallelism=%d",
-							withSelect, channels, goroutines, parallelism),
-							func(b *testing.B) {
-								runBenchmark(b, producers, consumers, channels, parallelism, withSelect, kovalAlgo)
-							})
+	for _, spin := range spins {
+		// Redirect output
+		outFile, _ := os.Create(fmt.Sprintf("spin%dsegm%d.out"))
+		os.Stdout = outFile
+		for _, withSelect := range [2]bool{false, true} {
+			for _, channels := range contentionFactor {
+				for _, goroutines := range goroutines {
+					for _, parallelism := range parallelism {
+						producers := goroutines / (channels * 2)
+						if producers == 0 {
+							producers = (parallelism + 1) / 2 // round up
+						}
+						consumers := producers // N:N case
+						//var algo string
+						//if kovalAlgo {
+						//	algo = fmt.Sprintf("k_spin%d_segm%d",spin, segmentSize)
+						//} else {
+						//	algo = "golang"
+						//}
+						// Warm-up at first
+						for times := 0; times < 2; times++ {
+							runBenchmark(b, producers, consumers, channels, parallelism, withSelect, kovalAlgo, spin)
+						}
+						// Then run benchmarks
+						for times := 0; times < 10; times++ {
+							runtime.GC()
+							b.Run(fmt.Sprintf("withSelect=%t/channels=%d/goroutines=%d/parallelism=%d",
+								withSelect, channels, goroutines, parallelism),
+								func(b *testing.B) {
+									runBenchmark(b, producers, consumers, channels, parallelism, withSelect, kovalAlgo, spin)
+								})
+						}
 					}
 				}
 			}
@@ -49,7 +54,7 @@ func BenchmarkNN(b *testing.B) {
 	}
 }
 
-func runBenchmark(b *testing.B, producers int, consumers int, channels int, parallelism int, withSelect bool, kovalAlgo bool) {
+func runBenchmark(b *testing.B, producers int, consumers int, channels int, parallelism int, withSelect bool, kovalAlgo bool, spin int) {
 	b.StopTimer()
 	// Set benchmark parameters
 	runtime.GOMAXPROCS(parallelism)
@@ -67,7 +72,7 @@ func runBenchmark(b *testing.B, producers int, consumers int, channels int, para
 	// Do producer-consumer work in goroutines
 	for channel := 0; channel < channels; channel++ {
 		if kovalAlgo {
-			runWithOneChannelKoval(b, wg, producers, consumers, n, withSelect)
+			runWithOneChannelKoval(b, wg, producers, consumers, n, withSelect, spin)
 		} else {
 			runWithOneChannelGo(b, wg, producers, consumers, n, withSelect)
 		}
@@ -116,7 +121,7 @@ func runWithOneChannelGo(b *testing.B, wg *sync.WaitGroup, producers int, consum
 	}
 }
 
-func runWithOneChannelKoval(b *testing.B, wg *sync.WaitGroup, producers int, consumers int, n int, withSelect bool) {
+func runWithOneChannelKoval(b *testing.B, wg *sync.WaitGroup, producers int, consumers int, n int, withSelect bool, spin int) {
 	c := NewLFChan(spin)
 	// Run producers
 	for i := 0; i < producers; i++ {
@@ -199,5 +204,9 @@ func goroutinesFactor() int {
 
 const minBatchSize = 100000
 var parallelism = []int{1, 2, 4, 6, 8, 12, 16, 18, 24, 32, 36, 48, 64, 72, 96, 108, 128, 144}
-var contentionFactor = []int{1, 2, 4, 8, 16, 32}
-var goroutines = []int{0, goroutinesFactor(), goroutinesFactor() * 10, goroutinesFactor() * 100}
+var contentionFactor = []int{1, 10}
+//var contentionFactor = []int{1, 2, 4, 8, 16, 32}
+var goroutines = []int{0, goroutinesFactor()}
+//var goroutines = []int{0, goroutinesFactor(), goroutinesFactor() * 10, goroutinesFactor() * 100}
+
+var spins = []int{0, 50, 100, 200, 300, 500, 700, 1000, 1300, 1600, 2000, 2500, 3000, 4000, 6000, 10000, 2147483647}
