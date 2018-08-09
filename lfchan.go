@@ -103,14 +103,13 @@ func (c *LFChan) Receive() unsafe.Pointer {
 }
 
 func (c* LFChan) sendOrReceiveSuspend(element unsafe.Pointer) unsafe.Pointer {
-	gp := runtime.GetGoroutine()
 	try_again: for { // CAS-loop
 		enqIdx := c.enqIdx()
 		deqIdx := c.deqIdx()
 		if enqIdx < deqIdx { continue try_again }
 		// Check if queue is empty
 		if deqIdx == enqIdx {
-			addSuccess, _ := c.addToWaitingQueue(enqIdx, element, gp)
+			addSuccess, _ := c.addToWaitingQueue(enqIdx, element, nil)
 			if addSuccess {
 				return parkAndThenReturn()
 			} else { continue try_again }
@@ -152,7 +151,7 @@ func (c* LFChan) sendOrReceiveSuspend(element unsafe.Pointer) unsafe.Pointer {
 				} else { continue try_again }
 			} else {
 				for {
-					addSuccess, _ := c.addToWaitingQueue(enqIdx, element, gp)
+					addSuccess, _ := c.addToWaitingQueue(enqIdx, element, nil)
 					if addSuccess {
 						return parkAndThenReturn()
 					} else { continue try_again }
@@ -206,6 +205,8 @@ func (c *LFChan) addToWaitingQueue(enqIdx int64, element unsafe.Pointer, cont un
 		c.casEnqIdx(enqIdx, enqIdx + 1)
 		return false, RegInfo{}
 	}
+	// Get continuation if needed
+	if cont == nil { cont = runtime.GetGoroutine() }
 	// Check if a new node should be added
 	if tailId == enqIdxNodeId - 1 && enqIdxInNode == 0 {
 		success, node := c.addNewNode(tail, element, enqIdx, cont)
