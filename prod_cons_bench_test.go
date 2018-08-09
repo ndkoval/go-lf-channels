@@ -193,17 +193,11 @@ func goroutinesFactor() int {
 	for _,e := range parallelism {
 		res = lcf(res, e)
 	}
-	//for _,e := range contentionFactor {
-	//	res = lcf(res, e)
-	//}
 	res *= 2
 	return res
 }
 
 const minBatchSize = 100000
 var parallelism = []int{1, 2, 4, 6, 8, 12, 16, 18, 24, 32, 36, 48, 64, 72, 96, 108, 128, 144}
-//var parallelism = []int{1, 2, 4, 6}
-//var contentionFactor = []int{1, 2, 4, 8, 16, 32}
-var contentionFactor = []int{1}
-//var goroutines = []int{0, goroutinesFactor(), goroutinesFactor() * 10, goroutinesFactor() * 100}
-var goroutines = []int{0}
+var contentionFactor = []int{1, 2, 4, 8, 16, 32}
+var goroutines = []int{0, goroutinesFactor(), goroutinesFactor() * 10, goroutinesFactor() * 100}

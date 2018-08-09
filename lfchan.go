@@ -7,6 +7,16 @@ import (
 	"math/rand"
 )
 
+type LFChan struct {
+	spinThreshold int
+
+	_deqIdx int64
+	_enqIdx int64
+
+	_head unsafe.Pointer
+	_tail unsafe.Pointer
+}
+
 func NewLFChan(spinThreshold int) *LFChan {
 	emptyNode := (unsafe.Pointer) (newNode(0, nil))
 	return &LFChan{
@@ -18,28 +28,12 @@ func NewLFChan(spinThreshold int) *LFChan {
 	}
 }
 
-type LFChan struct {
-	spinThreshold int
-
-	_deqIdx int64
-	_enqIdx int64
-
-	_head unsafe.Pointer
-	_tail unsafe.Pointer
-}
-
 type node struct {
 	id          int64
 	_next       unsafe.Pointer
 	_data       [segmentSize * 2]unsafe.Pointer
 	_cleaned int32
 	_prev 		unsafe.Pointer
-}
-
-const removedAndNextType int32 = 876398457
-type removedAndNext struct {
-	__type int32
-	node *node
 }
 
 func newNode(id int64, prev *node) *node {
@@ -51,70 +45,53 @@ func newNode(id int64, prev *node) *node {
 	}
 }
 
-func clean(node *node, index int32) {
-	cont := node.readContinuation(index)
-	if cont == takenContinuation { return }
-	if !node.casContinuation(index, cont, takenContinuation) { return }
-	atomic.StorePointer(&node._data[index * 2], takenElement)
-	if atomic.AddInt32(&node._cleaned, 1) < segmentSize { return }
-	// Remove the node
-	if node.prev() == nil { return } // do not remove head
-	node.removeLogically()
-	node.removePhysically()
+const removedAndNextType int32 = 876398457
+type removedAndNext struct {
+	__type int32
+	node *node
 }
 
-func (n *node) removeLogically() {
-	for {
-		nextNode := n.next()
-		var newNextNode unsafe.Pointer
-		if nextNode == nil {
-			newNextNode = removedTail
-		} else {
-			newNextNode = unsafe.Pointer(&removedAndNext{
-				__type: removedAndNextType,
-				node:   (*node) (nextNode),
-			})
-		}
-		if n.casNext(nextNode, newNextNode) { return }
-	}
+type SelectAlternative struct {
+	channel *LFChan
+	element unsafe.Pointer
+	action  func(result unsafe.Pointer)
 }
 
-func (n *node) removePhysically() {
-	for {
-		prev := n.prev()
-		var prevNext unsafe.Pointer
-		var prevNextNode *node
-		var prevRemoved bool
-		for {
-			if prev == nil {
-				return
-			}
-			prevNext = prev.next()
-			prevNextNode, prevRemoved = readNext(prevNext)
-			if prevRemoved {
-				prev = prev.prev()
-			} else {
-				break
-			}
-		}
-		next, _ := n.readNext()
-		if prevNextNode == next { return }
-		if !prev.casNext(prevNext, unsafe.Pointer(next)) {
-			continue
-		}
-		if next != nil {
-			_, nextRemoved := next.readNext()
-			if nextRemoved { next.removePhysically() }
-		}
-		return
-	}
+const SelectInstanceType int32 = 1298498092
+type SelectInstance struct {
+	__type int32
+	id int64
+	alternatives *[]SelectAlternative
+	regInfos *[]RegInfo
+	state unsafe.Pointer
+	gp	  unsafe.Pointer // goroutine
 }
+
+type RegInfo struct {
+	node *node
+	index int32
+}
+
+const SelectDescType int32 = 2019727883
+type SelectDesc struct {
+	__type int32
+	channel *LFChan
+	selectInstance *SelectInstance
+	cont unsafe.Pointer // either *SelectInstance or *g
+
+	status int32 // 0 -- UNDECIDED, 1 -- SUCCESS, 2 -- FAIL
+}
+const UNDECIDED = 0
+const SUCCEEDED = 1
+const FAILED = 2
 
 var takenContinuation = (unsafe.Pointer) ((uintptr) (1))
 var takenElement = (unsafe.Pointer) ((uintptr) (2))
 var removedTail = unsafe.Pointer(uintptr(4097))
 var ReceiverElement = (unsafe.Pointer) ((uintptr) (4096))
 const segmentSize = 32
+
+var selectIdGen int64 = 0
 
 
 func (c *LFChan) Send(element unsafe.Pointer) {
@@ -338,7 +315,6 @@ func (c *LFChan) tryResumeContinuation(head *node, indexInNode int32, deqIdx int
 	}
 }
 
-var selectIdGen int64 = 0
 
 func (c *LFChan) tryResumeContinuationForSelect(head *node, indexInNode int32, deqIdx int64, element unsafe.Pointer, selectInstance *SelectInstance, firstElement unsafe.Pointer) bool {
 	// Set descriptor at first
@@ -385,14 +361,6 @@ func (c *LFChan) tryResumeContinuationForSelect(head *node, indexInNode int32, d
 	runtime.SetGParam(selectInstance.gp, firstElement)
 	runtime.UnparkUnsafe(selectInstance.gp)
 	return true
-}
-
-func (n *node) casContinuation(index int32, old, new unsafe.Pointer) bool {
-	return atomic.CompareAndSwapPointer(&n._data[index * 2 + 1], old, new)
-}
-
-func (n *node) setContinuation(index int32, cont unsafe.Pointer) {
-	atomic.StorePointer(&n._data[index * 2 + 1], cont)
 }
 
 func (n *node) readContinuation(index int32) unsafe.Pointer {
@@ -483,40 +451,6 @@ func (c *LFChan) regSelect(selectInstance *SelectInstance, element unsafe.Pointe
 	}
 }
 
-type SelectAlternative struct {
-	channel *LFChan
-	element unsafe.Pointer
-	action  func(result unsafe.Pointer)
-}
-
-const SelectInstanceType int32 = 1298498092
-type SelectInstance struct {
-	__type int32
-	id int64
-	alternatives *[]SelectAlternative
-	regInfos *[]RegInfo
-	state unsafe.Pointer
-	gp	  unsafe.Pointer // goroutine
-}
-
-type RegInfo struct {
-	node *node
-	index int32
-}
-
-const SelectDescType int32 = 2019727883
-type SelectDesc struct {
-	__type int32
-	channel *LFChan
-	selectInstance *SelectInstance
-	cont unsafe.Pointer // either *SelectInstance or *g
-
-	status int32 // 0 -- UNDECIDED, 1 -- SUCCESS, 2 -- FAIL
-}
-const UNDECIDED = 0
-const SUCCEEDED = 1
-const FAILED = 2
-
 func (sd *SelectDesc) invoke() bool {
 	curStatus := sd.getStatus()
 	if curStatus != UNDECIDED { return curStatus == SUCCEEDED }
@@ -583,22 +517,6 @@ func (s *SelectInstance) trySetDescriptor(desc unsafe.Pointer) bool {
 		if state != nil { return false }
 		if s.casState(nil, desc) { return true }
 	}
-}
-
-func (s *SelectInstance) getState() unsafe.Pointer {
-	return atomic.LoadPointer(&s.state)
-}
-
-func (s *SelectInstance) setState(state unsafe.Pointer) {
-	atomic.StorePointer(&s.state, state)
-}
-
-func (s *SelectInstance) casState(old, new unsafe.Pointer) bool{
-	return atomic.CompareAndSwapPointer(&s.state, old, new)
-}
-
-func IntType(p unsafe.Pointer) int32 {
-	return *(*int32)(p)
 }
 
 func Select(alternatives ...SelectAlternative)  {
@@ -693,6 +611,70 @@ func (s *SelectInstance) cancelNonSelectedAlternatives() {
 	}
 }
 
+// ==== CLEANING ====
+
+func clean(node *node, index int32) {
+	cont := node.readContinuation(index)
+	if cont == takenContinuation { return }
+	if !node.casContinuation(index, cont, takenContinuation) { return }
+	atomic.StorePointer(&node._data[index * 2], takenElement)
+	if atomic.AddInt32(&node._cleaned, 1) < segmentSize { return }
+	// Remove the node
+	if node.prev() == nil { return } // do not remove head
+	node.removeLogically()
+	node.removePhysically()
+}
+
+func (n *node) removeLogically() {
+	for {
+		nextNode := n.next()
+		var newNextNode unsafe.Pointer
+		if nextNode == nil {
+			newNextNode = removedTail
+		} else {
+			newNextNode = unsafe.Pointer(&removedAndNext{
+				__type: removedAndNextType,
+				node:   (*node) (nextNode),
+			})
+		}
+		if n.casNext(nextNode, newNextNode) { return }
+	}
+}
+
+func (n *node) removePhysically() {
+	// TODO FIX ME
+	//for {
+	//	prev := n.prev()
+	//	var prevNext unsafe.Pointer
+	//	var prevNextNode *node
+	//	var prevRemoved bool
+	//	for {
+	//		if prev == nil {
+	//			return
+	//		}
+	//		prevNext = prev.next()
+	//		prevNextNode, prevRemoved = readNext(prevNext)
+	//		if prevRemoved {
+	//			prev = prev.prev()
+	//		} else {
+	//			break
+	//		}
+	//	}
+	//	next, _ := n.readNext()
+	//	if prevNextNode == next { return }
+	//	if !prev.casNext(prevNext, unsafe.Pointer(next)) {
+	//		continue
+	//	}
+	//	if next != nil {
+	//		_, nextRemoved := next.readNext()
+	//		if nextRemoved { next.removePhysically() }
+	//	}
+	//	return
+	//}
+}
+
+
+
 
 // === FUCKING GOLANG ===
 
@@ -776,4 +758,28 @@ func readNext(nextPointer unsafe.Pointer) (*node, bool) {
 	} else {
 		return (*node) (nextPointer), false
 	}
+}
+
+func (s *SelectInstance) getState() unsafe.Pointer {
+	return atomic.LoadPointer(&s.state)
+}
+
+func (s *SelectInstance) setState(state unsafe.Pointer) {
+	atomic.StorePointer(&s.state, state)
+}
+
+func (s *SelectInstance) casState(old, new unsafe.Pointer) bool{
+	return atomic.CompareAndSwapPointer(&s.state, old, new)
+}
+
+func IntType(p unsafe.Pointer) int32 {
+	return *(*int32)(p)
+}
+
+func (n *node) casContinuation(index int32, old, new unsafe.Pointer) bool {
+	return atomic.CompareAndSwapPointer(&n._data[index * 2 + 1], old, new)
+}
+
+func (n *node) setContinuation(index int32, cont unsafe.Pointer) {
+	atomic.StorePointer(&n._data[index * 2 + 1], cont)
 }

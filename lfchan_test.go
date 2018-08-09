@@ -310,7 +310,6 @@ func TestCancellation(t *testing.T) {
 	head := dummy.getHead()
 	headNext, _ := head.readNext()
 	tail := dummy.getTail()
-	println(dummy._deqIdx, "   ", dummy._enqIdx)
 	if head == tail || headNext == tail { return }
 	t.Fatal("Channel contains empy nodes which are niether head or tail")
 }
