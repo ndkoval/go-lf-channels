@@ -5,6 +5,7 @@ import (
 	"runtime"
 	"unsafe"
 	"math/rand"
+	"time"
 )
 
 type LFChan struct {
@@ -102,8 +103,22 @@ func (c *LFChan) Receive() unsafe.Pointer {
 	return c.sendOrReceiveSuspend(ReceiverElement)
 }
 
+const maxBackoffMask = 0x111111111111
+var consumedCPU int32 = int32(time.Now().Unix())
+
+func consumeCPU(tokens int) {
+	t := int(atomic.LoadInt32(&consumedCPU)) // volatile read
+	for i := tokens; i > 0; i-- {
+		t += (t * 0x5DEECE66D + 0xB + i) & (0xFFFFFFFFFFFF)
+	}
+	if t == 42 { atomic.StoreInt32(&consumedCPU, consumedCPU + int32(t)) }
+}
+
 func (c* LFChan) sendOrReceiveSuspend(element unsafe.Pointer) unsafe.Pointer {
+	var backoff = 1
 	try_again: for { // CAS-loop
+		backoff = (backoff * 2) & maxBackoffMask
+		consumeCPU(backoff)
 		enqIdx := c.enqIdx()
 		deqIdx := c.deqIdx()
 		if enqIdx < deqIdx { continue try_again }
@@ -394,8 +409,11 @@ func (n *node) readContinuation(index int32) unsafe.Pointer {
 // === SELECT ===
 
 func (c *LFChan) regSelect(selectInstance *SelectInstance, element unsafe.Pointer) (bool, RegInfo) {
+	var backoff = 1
 	try_again: for { // CAS-loop
 		if selectInstance.isSelected() { return false, RegInfo{} }
+		backoff = (backoff * 2) & maxBackoffMask
+		consumeCPU(backoff)
 		enqIdx := c.enqIdx()
 		deqIdx := c.deqIdx()
 		if enqIdx < deqIdx { continue try_again }
