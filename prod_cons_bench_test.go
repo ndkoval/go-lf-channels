@@ -17,7 +17,7 @@ const kovalAlgo = true
 func BenchmarkNN(b *testing.B) {
 	for _, spin := range spins {
 		// Redirect output
-		outFile, _ := os.Create(fmt.Sprintf("spin%dsegm%d.out"))
+		outFile, _ := os.Create(fmt.Sprintf("spin%dsegm%d.out", spin, segmentSize))
 		os.Stdout = outFile
 		for _, withSelect := range [2]bool{false, true} {
 			for _, channels := range contentionFactor {
