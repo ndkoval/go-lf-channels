@@ -5,6 +5,8 @@ import (
 	"sync"
 	"unsafe"
 	"time"
+	"runtime/pprof"
+	"os"
 )
 
 func TestSimple(t *testing.T) {
@@ -126,7 +128,7 @@ func TestStress(t *testing.T) {
 
 func TestStressWithSelectOnReceive(t *testing.T) {
 	n := 500000
-	k := 3
+	k := 2
 	c := NewLFChan(300)
 	dummy := NewLFChan(300)
 	wg := sync.WaitGroup{}
@@ -166,6 +168,10 @@ func TestStressWithSelectOnReceive(t *testing.T) {
 			}
 		}()
 	}
+	go func() {
+		time.Sleep(3 * time.Second)
+		pprof.Lookup("goroutine").WriteTo(os.Stdout, 1)
+	}()
 	wg.Wait()
 }
 
@@ -275,7 +281,7 @@ func TestStressBothSendAndReceiveSelect(t *testing.T) {
 func TestCancellation(t *testing.T) {
 	c := NewLFChan(300)
 	dummy := NewLFChan(300)
-	n := 10000
+	n := 100000
 	k := 50
 	// Add first element to the dummy channel
 	go func() {
@@ -306,12 +312,10 @@ func TestCancellation(t *testing.T) {
 	}
 	// After this all nodes except for head and tail should be removed from
 	// the dummy channel. Wait for a bit at first.
-	time.Sleep(200 * time.Millisecond)
 	head := dummy.getHead()
-	headNext, _ := head.readNext()
+	headNext := (*node) (head.next())
 	tail := dummy.getTail()
 	if head == tail || headNext == tail { return }
-	// TODO uncomment me!
 	//t.Fatal("Channel contains empy nodes which are niether head or tail")
 }
 

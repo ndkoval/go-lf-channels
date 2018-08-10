@@ -46,12 +46,6 @@ func newNode(id int64, prev *node) *node {
 	}
 }
 
-const removedAndNextType int32 = 876398457
-type removedAndNext struct {
-	__type int32
-	node *node
-}
-
 type SelectAlternative struct {
 	channel *LFChan
 	element unsafe.Pointer
@@ -88,7 +82,6 @@ const FAILED = 2
 
 var takenContinuation = (unsafe.Pointer) ((uintptr) (1))
 var takenElement = (unsafe.Pointer) ((uintptr) (2))
-var removedTail = unsafe.Pointer(uintptr(4097))
 var ReceiverElement = (unsafe.Pointer) ((uintptr) (4096))
 const segmentSize = 32
 
@@ -104,7 +97,7 @@ func (c *LFChan) Receive() unsafe.Pointer {
 }
 
 const maxBackoffMask = 0x111111111111
-var consumedCPU int32 = int32(time.Now().Unix())
+var consumedCPU = int32(time.Now().Unix())
 
 func consumeCPU(tokens int) {
 	t := int(atomic.LoadInt32(&consumedCPU)) // volatile read
@@ -115,10 +108,7 @@ func consumeCPU(tokens int) {
 }
 
 func (c* LFChan) sendOrReceiveSuspend(element unsafe.Pointer) unsafe.Pointer {
-	var backoff = 1
 	try_again: for { // CAS-loop
-		backoff = (backoff * 2) & maxBackoffMask
-		consumeCPU(backoff)
 		enqIdx := c.enqIdx()
 		deqIdx := c.deqIdx()
 		if enqIdx < deqIdx { continue try_again }
@@ -137,16 +127,16 @@ func (c* LFChan) sendOrReceiveSuspend(element unsafe.Pointer) unsafe.Pointer {
 				continue try_again
 			}
 			deqIdxNodeId := nodeId(deqIdx)
-			// Check that deqIdx is not outdated
+			// Check that deqI dx is not outdated
 			if headId > deqIdxNodeId {
 				continue try_again
 			}
 			// Check that head pointer should be moved forward
 			if headId < deqIdxNodeId {
-				headNext, _ := head.readNext()
-				atomic.StorePointer(&headNext._prev, nil)
-				c.casHead(head, unsafe.Pointer(headNext))
-				headNext._prev = nil
+				headNext := head.next()
+				headNextNode := (*node) (headNext)
+				headNextNode._prev = nil
+				c.casHead(head, headNext)
 				continue try_again
 			}
 			// Read the first element
@@ -245,35 +235,27 @@ func (c *LFChan) addToWaitingQueue(enqIdx int64, element unsafe.Pointer, cont un
 func (c *LFChan) addNewNode(tail *node, element unsafe.Pointer, enqIdx int64, cont unsafe.Pointer) (bool, *node) {
 	for {
 		// If next node is not null, help to move the tail pointer
-		tailNext := tail.next()
-		tailNextNode, tailRemoved := readNext(tailNext)
-		if tailNextNode != nil {
+		tailNext := (*node) (tail.next())
+		if tailNext != nil {
 			// If this CAS fails, another thread moved the tail pointer
-			c.casTail(tail, tailNextNode)
-			c.casEnqIdx(enqIdx, enqIdx+1) // help
+			c.casTail(tail, tailNext)
+			c.casEnqIdx(enqIdx, enqIdx + 1) // help
 			return false, nil
 		}
 		// Create a new node with this continuation and element and try to add it
 		newTail := newNode(tail.id + 1, tail)
 		newTail._data[0] = element
 		newTail._data[1] = cont
-		var newTailNext unsafe.Pointer
-		if tailRemoved {
-			newTailNext = unsafe.Pointer(&removedAndNext{
-				__type: removedAndNextType,
-				node:   newTail,
-			})
-		} else {
-			newTailNext = unsafe.Pointer(newTail)
-		}
-		if tail.casNext(tailNext, newTailNext) {
+		if tail.casNext(nil, unsafe.Pointer(newTail)) {
 			// New node added, try to move tail,
 			// if the CAS fails, another thread moved it.
 			c.casTail(tail, newTail)
-			c.casEnqIdx(enqIdx, enqIdx+1) // help for others
+			c.casEnqIdx(enqIdx, enqIdx + 1) // help for others
 			// Remove the previous tail from the waiting queue
 			// if it was marked as logically removed.
-			if tailRemoved { tail.removePhysically() }
+			if tail.isRemoved() {
+				tail.remove()
+			}
 			// Success, return true.
 			return true, newTail
 		} else { continue }
@@ -388,8 +370,6 @@ func (n *node) readContinuation(index int32) unsafe.Pointer {
 		}
 		contType := IntType(cont)
 		switch contType {
-		case SelectInstanceType:
-			return cont
 		case SelectDescType:
 			desc := (*SelectDesc)(cont)
 			if desc.invoke() {
@@ -399,7 +379,7 @@ func (n *node) readContinuation(index int32) unsafe.Pointer {
 				atomic.CompareAndSwapPointer(contPointer, cont, desc.cont)
 				return desc.cont
 			}
-		default: // *g
+		default: // *g or *SelectInstance
 			return cont
 		}
 	}
@@ -409,11 +389,9 @@ func (n *node) readContinuation(index int32) unsafe.Pointer {
 // === SELECT ===
 
 func (c *LFChan) regSelect(selectInstance *SelectInstance, element unsafe.Pointer) (bool, RegInfo) {
-	var backoff = 1
 	try_again: for { // CAS-loop
+		//println(selectInstance)
 		if selectInstance.isSelected() { return false, RegInfo{} }
-		backoff = (backoff * 2) & maxBackoffMask
-		consumeCPU(backoff)
 		enqIdx := c.enqIdx()
 		deqIdx := c.deqIdx()
 		if enqIdx < deqIdx { continue try_again }
@@ -427,6 +405,7 @@ func (c *LFChan) regSelect(selectInstance *SelectInstance, element unsafe.Pointe
 			// Queue is not empty
 			head := c.getHead()
 			headId := head.id
+			//println(selectInstance, "  ", deqIdx, "   ", enqIdx, "   H:", head, "  HN:", head.next())
 			deqIdxNodeId := nodeId(deqIdx)
 			// Check that deqIdx is not outdated
 			if headId > deqIdxNodeId {
@@ -434,10 +413,10 @@ func (c *LFChan) regSelect(selectInstance *SelectInstance, element unsafe.Pointe
 			}
 			// Check that head pointer should be moved forward
 			if headId < deqIdxNodeId {
-				headNext, _ := head.readNext()
-				atomic.StorePointer(&headNext._prev, nil)
-				c.casHead(head, unsafe.Pointer(headNext))
-				headNext._prev = nil
+				headNext := head.next()
+				headNextNode := (*node) (headNext)
+				headNextNode._prev = nil
+				c.casHead(head, headNext)
 				continue try_again
 			}
 			// Read the first element
@@ -479,18 +458,23 @@ func (sd *SelectDesc) invoke() bool {
 	anotherCont := sd.cont
 	anotherContType := IntType(anotherCont)
 	sdp := unsafe.Pointer(sd)
+	failed := false
 	if anotherContType == SelectInstanceType {
 		anotherSelectInstance := (*SelectInstance) (anotherCont)
 		if selectInstance.id < anotherSelectInstance.id {
-			if !selectInstance.trySetDescriptor(sdp) || !anotherSelectInstance.trySetDescriptor(sdp) {
-				sd.setStatus(FAILED)
-				return false
-			}
+			if selectInstance.trySetDescriptor(sdp) {
+				if !anotherSelectInstance.trySetDescriptor(sdp) {
+					failed = true
+					selectInstance.resetState(sdp)
+				}
+			} else { failed = true }
 		} else {
-			if !anotherSelectInstance.trySetDescriptor(sdp) || !selectInstance.trySetDescriptor(sdp) {
-				sd.setStatus(FAILED)
-				return false
-			}
+			if anotherSelectInstance.trySetDescriptor(sdp) {
+				if !selectInstance.trySetDescriptor(sdp) {
+					failed = true
+					anotherSelectInstance.resetState(sdp)
+				}
+			} else { failed = true }
 		}
 	} else {
 		if !selectInstance.trySetDescriptor(sdp) {
@@ -499,8 +483,17 @@ func (sd *SelectDesc) invoke() bool {
 		}
 	}
 	// Phase 3 -- update descriptor's and selectInstance statuses
-	sd.setStatus(SUCCEEDED)
-	return true
+	if (failed) {
+		sd.setStatus(FAILED)
+		return false
+	} else {
+		sd.setStatus(SUCCEEDED)
+		return true
+	}
+}
+
+func (s *SelectInstance) resetState(desc unsafe.Pointer) {
+	s.casState(desc, nil)
 }
 
 
@@ -639,61 +632,62 @@ func clean(node *node, index int32) {
 	atomic.StorePointer(&node._data[index * 2], takenElement)
 	if atomic.AddInt32(&node._cleaned, 1) < segmentSize { return }
 	// Remove the node
-	if node.prev() == nil { return } // do not remove head
-	node.removeLogically()
-	node.removePhysically()
+	node.remove()
 }
 
-func (n *node) removeLogically() {
+func (n *node) isRemoved() bool {
+	return atomic.LoadInt32(&n._cleaned) == segmentSize
+}
+
+func (n *node) remove() {
+	if (true) { return }
+	next := n.next()
+	if next == nil { return }
+	nextNode := (*node) (next)
+	for nextNode.isRemoved() {
+		newNext := nextNode.next()
+		if newNext == nil { break }
+		next = newNext
+		nextNode = (*node) (next)
+	}
+	prev := n.prev()
+	prevNode := (*node) (prev)
 	for {
-		nextNode := n.next()
-		var newNextNode unsafe.Pointer
-		if nextNode == nil {
-			newNextNode = removedTail
-		} else {
-			newNextNode = unsafe.Pointer(&removedAndNext{
-				__type: removedAndNextType,
-				node:   (*node) (nextNode),
-			})
+		if prev == nil {
+			nextNode.movePrevLefter(nil)
+			return
 		}
-		if n.casNext(nextNode, newNextNode) { return }
+		if prevNode.isRemoved() {
+			prev = prevNode.prev()
+			prevNode = (*node) (prev)
+			continue
+		}
+		prevNode.moveNextRighter(nextNode)
+		nextNode.movePrevLefter(prevNode)
+		if nextNode.isRemoved() || !prevNode.isRemoved() { return }
+		prev = prevNode.prev()
+		prevNode = (*node) (prev)
 	}
 }
 
-func (n *node) removePhysically() {
-	// TODO FIX ME
-	//for {
-	//	prev := n.prev()
-	//	var prevNext unsafe.Pointer
-	//	var prevNextNode *node
-	//	var prevRemoved bool
-	//	for {
-	//		if prev == nil {
-	//			return
-	//		}
-	//		prevNext = prev.next()
-	//		prevNextNode, prevRemoved = readNext(prevNext)
-	//		if prevRemoved {
-	//			prev = prev.prev()
-	//		} else {
-	//			break
-	//		}
-	//	}
-	//	next, _ := n.readNext()
-	//	if prevNextNode == next { return }
-	//	if !prev.casNext(prevNext, unsafe.Pointer(next)) {
-	//		continue
-	//	}
-	//	if next != nil {
-	//		_, nextRemoved := next.readNext()
-	//		if nextRemoved { next.removePhysically() }
-	//	}
-	//	return
-	//}
+func (n *node) moveNextRighter(newNext *node) {
+	for {
+		curNext := n.next()
+		curNextNode := (*node) (curNext)
+		if curNextNode.id >= newNext.id { return }
+		if n.casNext(curNext, unsafe.Pointer(newNext)) { return }
+	}
 }
 
-
-
+func (n *node) movePrevLefter(newPrev *node) {
+	for {
+		curPrev := n.prev()
+		if curPrev == nil { return }
+		curPrevNode := (*node) (curPrev)
+		if newPrev != nil && curPrevNode.id <= newPrev.id { return }
+		if n.casPrev(curPrev, unsafe.Pointer(newPrev)) { return }
+	}
+}
 
 // === FUCKING GOLANG ===
 
@@ -758,25 +752,12 @@ func (n *node) casNext(old, new unsafe.Pointer) bool {
 	return atomic.CompareAndSwapPointer(&n._next, old, new)
 }
 
-func (n *node) prev() *node {
-	return (*node) (atomic.LoadPointer(&n._prev))
+func (n *node) prev() unsafe.Pointer {
+	return atomic.LoadPointer(&n._prev)
 }
 
-// Returns a pair (node, removed)
-func (n *node) readNext() (*node, bool) {
-	nextPointer := n.next()
-	return readNext(nextPointer)
-}
-
-func readNext(nextPointer unsafe.Pointer) (*node, bool) {
-	if nextPointer == nil { return nil, false }
-	if nextPointer == removedTail { return nil, true }
-	if IntType(nextPointer) == removedAndNextType {
-		removedAndNext := (*removedAndNext) (nextPointer)
-		return removedAndNext.node, true
-	} else {
-		return (*node) (nextPointer), false
-	}
+func (n *node) casPrev(old, new unsafe.Pointer) bool {
+	return atomic.CompareAndSwapPointer(&n._prev, old, new)
 }
 
 func (s *SelectInstance) getState() unsafe.Pointer {
