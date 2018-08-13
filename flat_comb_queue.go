@@ -74,12 +74,18 @@ func (q *FCQueue) addTask(element unsafe.Pointer, cont unsafe.Pointer) (node *fc
 
 func (q *FCQueue) addTaskAndCombine(element unsafe.Pointer, cont unsafe.Pointer) unsafe.Pointer {
 	node, idx := q.addTask(element, cont)
-	for atomic.LoadPointer(&node._data[idx * 2 + 1]) != takenContinuation {
+	spin := 0
+	for atomic.LoadPointer(&node._data[idx * 2 + 1]) != nil {
 		if q.tryAcquireLock() {
 			q.combine()
 			q._fclock = UNLOCKED
 			break
-		} else { time.Sleep(1) }
+		} else {
+			spin++
+			if spin > 100 {
+				time.Sleep(1)
+			}
+		}
 
 	}
 	res := node._data[idx * 2]
@@ -99,7 +105,7 @@ func (q *FCQueue) tryAcquireLock() bool {
 func (q *FCQueue) combine() {
 	head := (*fcnode) (q.head)
 	for {
-		if head.deqIdx == atomic.LoadInt32(&head._enqIdx) && head.getNext() == nil { return }
+		if head.deqIdx >= atomic.LoadInt32(&head._enqIdx) && head.getNext() == nil { return }
 		idx := head.deqIdx
 		head.deqIdx++
 		if idx > BUFFER_SIZE - 1 {
@@ -109,18 +115,12 @@ func (q *FCQueue) combine() {
 			head = headNext
 			continue
 		}
-		element := atomic.LoadPointer(&head._data[idx * 2])
-		if element == nil {
-			if atomic.CompareAndSwapPointer(&head._data[idx * 2], nil, takenElement) {
-				continue
-			} else {
-				element = atomic.LoadPointer(&head._data[idx * 2])
-			}
-		}
+		element := atomic.SwapPointer(&head._data[idx * 2], takenElement)
+		if element == nil { continue }
 		cont := head._data[idx * 2 + 1]
 		res := q.c.sendOrReceiveFC(element, cont)
 		head._data[idx * 2] = res
-		atomic.StorePointer(&head._data[idx * 2 + 1], takenContinuation)
+		atomic.SwapPointer(&head._data[idx * 2 + 1], nil)
 	}
 }
 

@@ -186,7 +186,7 @@ func (c* LFChan) sendOrReceiveFC(element unsafe.Pointer, cont unsafe.Pointer) un
 func (c* LFChan) sendOrReceiveSuspend(element unsafe.Pointer) unsafe.Pointer {
 	fc := 0
 	try_again: for { // CAS-loop
-		if fc > 3 {
+		if fc > 5 {
 			return c.fcq.addTaskAndCombine(element, runtime.GetGoroutine())
 		}
  		enqIdx := c.enqIdx()
