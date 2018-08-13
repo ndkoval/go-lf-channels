@@ -108,26 +108,39 @@ func consumeCPU(tokens int) {
 }
 
 func (c* LFChan) sendOrReceiveSuspend(element unsafe.Pointer) unsafe.Pointer {
+	backoff := 32
 	try_again: for { // CAS-loop
 		enqIdx := c.enqIdx()
 		deqIdx := c.deqIdx()
-		if enqIdx < deqIdx { continue try_again }
+		if enqIdx < deqIdx {
+			backoff *= 2
+			consumeCPU(backoff)
+			continue try_again
+		}
 		// Check if queue is empty
 		if deqIdx == enqIdx {
 			if c.addToWaitingQueue2(enqIdx, element, nil) {
 				parkAndThenReturn()
-			} else { continue try_again }
+			} else {
+				backoff *= 2
+				consumeCPU(backoff)
+				continue try_again
+			}
 		} else {
 			// Queue is not empty
 			head := c.getHead()
 			headId := head.id
 			if deqIdx < segmentSize * headId {
 				c.casDeqIdx(deqIdx, segmentSize * headId)
+				backoff *= 2
+				consumeCPU(backoff)
 				continue try_again
 			}
 			deqIdxNodeId := nodeId(deqIdx)
 			// Check that deqI dx is not outdated
 			if headId > deqIdxNodeId {
+				backoff *= 2
+				consumeCPU(backoff)
 				continue try_again
 			}
 			// Check that head pointer should be moved forward
@@ -136,6 +149,8 @@ func (c* LFChan) sendOrReceiveSuspend(element unsafe.Pointer) unsafe.Pointer {
 				headNextNode := (*node) (headNext)
 				headNextNode._prev = nil
 				c.casHead(head, headNext)
+				backoff *= 2
+				consumeCPU(backoff)
 				continue try_again
 			}
 			// Read the first element
@@ -144,6 +159,8 @@ func (c* LFChan) sendOrReceiveSuspend(element unsafe.Pointer) unsafe.Pointer {
 			// Check that the element is not taken already.
 			if firstElement == takenElement {
 				c.casDeqIdx(deqIdx, deqIdx + 1)
+				backoff *= 2
+				consumeCPU(backoff)
 				continue try_again
 			}
 			// Decide should we make a rendezvous or not
@@ -152,7 +169,11 @@ func (c* LFChan) sendOrReceiveSuspend(element unsafe.Pointer) unsafe.Pointer {
 			if makeRendezvous {
 				if c.tryResumeContinuation(head, deqIdxInNode, deqIdx, element) {
 					return firstElement
-				} else { continue try_again }
+				} else {
+					backoff *= 2
+					consumeCPU(backoff)
+					continue try_again
+				}
 			} else {
 				for {
 					if c.addToWaitingQueue2(enqIdx, element, nil) {
@@ -160,7 +181,11 @@ func (c* LFChan) sendOrReceiveSuspend(element unsafe.Pointer) unsafe.Pointer {
 					}
 					enqIdx = c.enqIdx()
 					deqIdx = c.deqIdx()
-					if deqIdx >= deqIdxLimit { continue try_again }
+					if deqIdx >= deqIdxLimit {
+						backoff *= 2
+						consumeCPU(backoff)
+						continue try_again
+					}
 				}
 			}
 		}
@@ -178,12 +203,16 @@ func (c *LFChan) readElement(node *node, index int32) unsafe.Pointer {
 	element := atomic.LoadPointer(elementAddr) // volatile read
 	var attempt = 0
 	for {
-		if element != nil { return element }
-		attempt++
-		if attempt >= c.spinThreshold {
-			break
+		if attempt % 32 == 0 {
+			if element != nil {
+				return element
+			}
+			if attempt >= c.spinThreshold {
+				break
+			}
+			element = atomic.LoadPointer(elementAddr) // volatile read
 		}
-		element = atomic.LoadPointer(elementAddr) // volatile read
+		attempt++
 	}
 	// Cannot spin forever, mark the slot as broken if it is still unavailable
 	if atomic.CompareAndSwapPointer(elementAddr, nil, takenElement) {
