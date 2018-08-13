@@ -83,7 +83,9 @@ const FAILED = 2
 var takenContinuation = (unsafe.Pointer) ((uintptr) (1))
 var takenElement = (unsafe.Pointer) ((uintptr) (2))
 var ReceiverElement = (unsafe.Pointer) ((uintptr) (4096))
-const segmentSize = 64
+const segmentSizeShift = 8
+const segmentSize = 1 << segmentSizeShift
+const segmentIndexMask = segmentSize - 1
 
 var selectIdGen int64 = 0
 
@@ -96,7 +98,7 @@ func (c *LFChan) Receive() unsafe.Pointer {
 	return c.sendOrReceiveSuspend(ReceiverElement)
 }
 
-const maxBackoffMask = 0x11111111111
+const maxBackoffMask = 0x111111111111
 var consumedCPU = int32(time.Now().Unix())
 
 func consumeCPU(tokens int) {
@@ -719,11 +721,11 @@ func (c *LFChan) deqIdx() int64 {
 }
 
 func indexInNode(index int64) int32 {
-	return int32(index % int64(segmentSize))
+	return int32(index & segmentIndexMask)
 }
 
 func nodeId(index int64) int64 {
-	return index / int64(segmentSize)
+	return index >> segmentSizeShift
 }
 
 func parkAndThenReturn() unsafe.Pointer {
