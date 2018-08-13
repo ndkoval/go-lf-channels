@@ -83,7 +83,7 @@ const FAILED = 2
 var takenContinuation = (unsafe.Pointer) ((uintptr) (1))
 var takenElement = (unsafe.Pointer) ((uintptr) (2))
 var ReceiverElement = (unsafe.Pointer) ((uintptr) (4096))
-const segmentSize = 64
+const segmentSize = 32
 
 var selectIdGen int64 = 0
 
@@ -96,24 +96,26 @@ func (c *LFChan) Receive() unsafe.Pointer {
 	return c.sendOrReceiveSuspend(ReceiverElement)
 }
 
-const maxBackoffMask = 0x11111111111
-var consumedCPU = int32(time.Now().Unix())
+const maxBackoffMask uint32 = 0x1111
+var consumedCPU = int64(time.Now().Unix())
 
-func consumeCPU(tokens int) {
-	t := int(atomic.LoadInt32(&consumedCPU)) // volatile read
+func consumeCPU(backoffSize uint32) {
+	tokens := rand.Int31() % (1 << backoffSize)
+	t := atomic.LoadInt64(&consumedCPU) // volatile read
 	for i := tokens; i > 0; i-- {
-		t += (t * 0x5DEECE66D + 0xB + i) & (0xFFFFFFFFFFFF)
+		t += (t * 0x5DEECE66D + 0xB + int64(i)) & (0xFFFFFFFFFFFF)
 	}
-	if t == 42 { atomic.StoreInt32(&consumedCPU, consumedCPU + int32(t)) }
+	if t == 42 { atomic.StoreInt64(&consumedCPU, consumedCPU + t) }
 }
 
 func (c* LFChan) sendOrReceiveSuspend(element unsafe.Pointer) unsafe.Pointer {
-	backoff := 4
+	backoff := uint32(4)
 	try_again: for { // CAS-loop
 		enqIdx := c.enqIdx()
 		deqIdx := c.deqIdx()
 		if enqIdx < deqIdx {
-			backoff *= 2
+			backoff++
+			backoff &= maxBackoffMask
 			consumeCPU(backoff)
 			continue try_again
 		}
@@ -122,7 +124,7 @@ func (c* LFChan) sendOrReceiveSuspend(element unsafe.Pointer) unsafe.Pointer {
 			if c.addToWaitingQueue2(enqIdx, element, nil) {
 				return parkAndThenReturn()
 			} else {
-				backoff *= 2
+				backoff++
 				backoff &= maxBackoffMask
 				consumeCPU(backoff)
 				continue try_again
@@ -133,7 +135,7 @@ func (c* LFChan) sendOrReceiveSuspend(element unsafe.Pointer) unsafe.Pointer {
 			headId := head.id
 			if deqIdx < segmentSize * headId {
 				c.casDeqIdx(deqIdx, segmentSize * headId)
-				backoff *= 2
+				backoff++
 				backoff &= maxBackoffMask
 				consumeCPU(backoff)
 				continue try_again
@@ -141,7 +143,7 @@ func (c* LFChan) sendOrReceiveSuspend(element unsafe.Pointer) unsafe.Pointer {
 			deqIdxNodeId := nodeId(deqIdx)
 			// Check that deqI dx is not outdated
 			if headId > deqIdxNodeId {
-				backoff *= 2
+				backoff++
 				backoff &= maxBackoffMask
 				consumeCPU(backoff)
 				continue try_again
@@ -152,7 +154,7 @@ func (c* LFChan) sendOrReceiveSuspend(element unsafe.Pointer) unsafe.Pointer {
 				headNextNode := (*node) (headNext)
 				headNextNode._prev = nil
 				c.casHead(head, headNext)
-				backoff *= 2
+				backoff++
 				backoff &= maxBackoffMask
 				consumeCPU(backoff)
 				continue try_again
@@ -163,7 +165,7 @@ func (c* LFChan) sendOrReceiveSuspend(element unsafe.Pointer) unsafe.Pointer {
 			// Check that the element is not taken already.
 			if firstElement == takenElement {
 				c.casDeqIdx(deqIdx, deqIdx + 1)
-				backoff *= 2
+				backoff++
 				backoff &= maxBackoffMask
 				consumeCPU(backoff)
 				continue try_again
@@ -175,7 +177,7 @@ func (c* LFChan) sendOrReceiveSuspend(element unsafe.Pointer) unsafe.Pointer {
 				if c.tryResumeContinuation(head, deqIdxInNode, deqIdx, element) {
 					return firstElement
 				} else {
-					backoff *= 2
+					backoff++
 					backoff &= maxBackoffMask
 					consumeCPU(backoff)
 					continue try_again
@@ -188,7 +190,7 @@ func (c* LFChan) sendOrReceiveSuspend(element unsafe.Pointer) unsafe.Pointer {
 					enqIdx = c.enqIdx()
 					deqIdx = c.deqIdx()
 					if deqIdx >= deqIdxLimit {
-						backoff *= 2
+						backoff++
 						backoff &= maxBackoffMask
 						consumeCPU(backoff)
 						continue try_again
