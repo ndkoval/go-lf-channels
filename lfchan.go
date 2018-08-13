@@ -157,7 +157,7 @@ func (c* LFChan) sendOrReceiveSuspend(element unsafe.Pointer) unsafe.Pointer {
 				for {
 					if c.addToWaitingQueue2(enqIdx, element, nil) {
 						parkAndThenReturn()
-					} else { continue try_again }
+					}
 					enqIdx = c.enqIdx()
 					deqIdx = c.deqIdx()
 					if deqIdx >= deqIdxLimit { continue try_again }
