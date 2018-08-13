@@ -96,7 +96,7 @@ func (c *LFChan) Receive() unsafe.Pointer {
 	return c.sendOrReceiveSuspend(ReceiverElement)
 }
 
-const maxBackoffMask = 0x111111111111
+const maxBackoffMask = 1 << 10
 var consumedCPU = int32(time.Now().Unix())
 
 func consumeCPU(tokens int) {
@@ -209,7 +209,7 @@ func (c *LFChan) readElement(node *node, index int32) unsafe.Pointer {
 	elementAddr := &node._data[index * 2]
 	var attempt = 0
 	for {
-		if attempt % 32 == 0 {
+		if attempt % 16 == 0 {
 			element := atomic.LoadPointer(elementAddr) // volatile read
 			if element != nil {
 				return element
