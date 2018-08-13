@@ -183,6 +183,8 @@ func (c* LFChan) sendOrReceiveFC(element unsafe.Pointer, cont unsafe.Pointer) un
 	}
 }
 
+const FC_START = 100
+
 func (c* LFChan) sendOrReceive(element unsafe.Pointer) unsafe.Pointer {
 	fc := 0
 	backoff := 2
@@ -194,7 +196,7 @@ func (c* LFChan) sendOrReceive(element unsafe.Pointer) unsafe.Pointer {
 			backoff *= 2
 			backoff &= maxBackoffMask
 			ConsumeCPU(backoff)
-			if fc > 100 {
+			if fc > FC_START {
 				return c.fcq.addTaskAndCombine(element, runtime.GetGoroutine())
 			}
 			continue try_again
@@ -208,7 +210,7 @@ func (c* LFChan) sendOrReceive(element unsafe.Pointer) unsafe.Pointer {
 				backoff *= 2
 				backoff &= maxBackoffMask
 				ConsumeCPU(backoff)
-				if fc > 8 {
+				if fc > FC_START {
 					return c.fcq.addTaskAndCombine(element, runtime.GetGoroutine())
 				}
 				continue try_again
@@ -223,7 +225,7 @@ func (c* LFChan) sendOrReceive(element unsafe.Pointer) unsafe.Pointer {
 				backoff *= 2
 				backoff &= maxBackoffMask
 				ConsumeCPU(backoff)
-				if fc > 8 {
+				if fc > FC_START {
 					return c.fcq.addTaskAndCombine(element, runtime.GetGoroutine())
 				}
 				continue try_again
@@ -235,7 +237,7 @@ func (c* LFChan) sendOrReceive(element unsafe.Pointer) unsafe.Pointer {
 				backoff *= 2
 				backoff &= maxBackoffMask
 				ConsumeCPU(backoff)
-				if fc > 8 {
+				if fc > FC_START {
 					return c.fcq.addTaskAndCombine(element, runtime.GetGoroutine())
 				}
 				continue try_again
@@ -250,7 +252,7 @@ func (c* LFChan) sendOrReceive(element unsafe.Pointer) unsafe.Pointer {
 				backoff *= 2
 				backoff &= maxBackoffMask
 				ConsumeCPU(backoff)
-				if fc > 8 {
+				if fc > FC_START {
 					return c.fcq.addTaskAndCombine(element, runtime.GetGoroutine())
 				}
 				continue try_again
@@ -265,7 +267,7 @@ func (c* LFChan) sendOrReceive(element unsafe.Pointer) unsafe.Pointer {
 				backoff *= 2
 				backoff &= maxBackoffMask
 				ConsumeCPU(backoff)
-				if fc > 8 {
+				if fc > FC_START {
 					return c.fcq.addTaskAndCombine(element, runtime.GetGoroutine())
 				}
 				continue try_again
