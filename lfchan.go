@@ -88,7 +88,7 @@ var takenContinuation = (unsafe.Pointer) ((uintptr) (1))
 var takenElement = (unsafe.Pointer) ((uintptr) (2))
 var ReceiverElement = (unsafe.Pointer) ((uintptr) (4096))
 var ParkResult = (unsafe.Pointer) ((uintptr) (4097))
-const segmentSizeShift = 8
+const segmentSizeShift = 6
 const segmentSize = 1 << segmentSizeShift
 const segmentIndexMask = segmentSize - 1
 
@@ -185,8 +185,9 @@ func (c* LFChan) sendOrReceiveFC(element unsafe.Pointer, cont unsafe.Pointer) un
 
 func (c* LFChan) sendOrReceiveSuspend(element unsafe.Pointer) unsafe.Pointer {
 	fc := 0
+	backoff := 4
 	try_again: for { // CAS-loop
-		if fc > 5 {
+		if fc > 8 {
 			return c.fcq.addTaskAndCombine(element, runtime.GetGoroutine())
 		}
  		enqIdx := c.enqIdx()
@@ -200,6 +201,8 @@ func (c* LFChan) sendOrReceiveSuspend(element unsafe.Pointer) unsafe.Pointer {
 				return parkAndThenReturn()
 			} else {
 				fc++
+				backoff *= 2
+				ConsumeCPU(backoff)
 				continue try_again
 			}
 		} else {
@@ -229,6 +232,9 @@ func (c* LFChan) sendOrReceiveSuspend(element unsafe.Pointer) unsafe.Pointer {
 			// Check that the element is not taken already.
 			if firstElement == takenElement {
 				c.casDeqIdx(deqIdx, deqIdx + 1)
+				fc++
+				backoff *= 2
+				ConsumeCPU(backoff)
 				continue try_again
 			}
 			// Decide should we make a rendezvous or not
@@ -239,6 +245,8 @@ func (c* LFChan) sendOrReceiveSuspend(element unsafe.Pointer) unsafe.Pointer {
 					return firstElement
 				} else {
 					fc++
+					backoff *= 2
+					ConsumeCPU(backoff)
 					continue try_again
 				}
 			} else {
@@ -250,6 +258,8 @@ func (c* LFChan) sendOrReceiveSuspend(element unsafe.Pointer) unsafe.Pointer {
 					deqIdx = c.deqIdx()
 					if deqIdx >= deqIdxLimit {
 						fc++
+						backoff *= 2
+						ConsumeCPU(backoff)
 						continue try_again
 					}
 				}
@@ -268,14 +278,12 @@ func (c *LFChan) readElement(node *node, index int32) unsafe.Pointer {
 	elementAddr := &node._data[index * 2]
 	var attempt = 0
 	for {
-		if attempt % 8 == 0 {
-			element := atomic.LoadPointer(elementAddr) // volatile read
-			if element != nil {
-				return element
-			}
-			if attempt >= c.spinThreshold {
-				break
-			}
+		element := atomic.LoadPointer(elementAddr) // volatile read
+		if element != nil {
+			return element
+		}
+		if attempt >= c.spinThreshold {
+			break
 		}
 		attempt++
 	}

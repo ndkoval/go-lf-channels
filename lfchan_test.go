@@ -317,11 +317,11 @@ func TestCancellation(t *testing.T) {
 }
 
 func IntToUnsafePointer(x int) unsafe.Pointer {
-	return (unsafe.Pointer)((uintptr)(x + 4097))
+	return (unsafe.Pointer)((uintptr)(x + 4098))
 }
 
 func UnsafePointerToInt(p unsafe.Pointer) int {
-	return (int) ((uintptr) (p)) - 4097
+	return (int) ((uintptr) (p)) - 4098
 }
 
 func (c *LFChan) SendInt(element int) {

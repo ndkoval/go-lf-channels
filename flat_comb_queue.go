@@ -22,18 +22,20 @@ type fcnode struct {
 	_data   [BUFFER_SIZE * 2]unsafe.Pointer
 }
 
-//type fcnode_initial struct {
-//	deqIdx int32
-//	_enqIdx int32
-//	_next   unsafe.Pointer
-//}
+type fcnode_initial struct {
+	deqIdx int32
+	_enqIdx int32
+	_next   unsafe.Pointer
+}
 
 const BUFFER_SIZE = 128
 const UNLOCKED = 0
 const LOCKED = 1
 
 func NewFCQueue(c *LFChan) *FCQueue {
-	initNode := &fcnode{}
+	initNode := &fcnode_initial{}
+	initNode._enqIdx = BUFFER_SIZE
+	initNode.deqIdx = BUFFER_SIZE
 	return &FCQueue{
 		c:       c,
 		head:    unsafe.Pointer(initNode),
