@@ -94,7 +94,7 @@ func TestSimpleSelects(t *testing.T) {
 
 func TestStress(t *testing.T) {
 	n := 500000
-	k := 2
+	k := 10
 	c := NewLFChan(300)
 	wg := sync.WaitGroup{}
 	// Run sender

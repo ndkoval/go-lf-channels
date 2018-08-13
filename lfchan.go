@@ -16,17 +16,21 @@ type LFChan struct {
 
 	_head unsafe.Pointer
 	_tail unsafe.Pointer
+
+	fcq *FCQueue
 }
 
 func NewLFChan(spinThreshold int) *LFChan {
 	emptyNode := (unsafe.Pointer) (newNode(0, nil))
-	return &LFChan{
+	c := &LFChan{
 		spinThreshold: spinThreshold,
 		_deqIdx: 1,
 		_enqIdx: 1,
 		_head: emptyNode,
 		_tail: emptyNode,
 	}
+	c.fcq = NewFCQueue(c)
+	return c
 }
 
 type node struct {
@@ -83,6 +87,7 @@ const FAILED = 2
 var takenContinuation = (unsafe.Pointer) ((uintptr) (1))
 var takenElement = (unsafe.Pointer) ((uintptr) (2))
 var ReceiverElement = (unsafe.Pointer) ((uintptr) (4096))
+var ParkResult = (unsafe.Pointer) ((uintptr) (4097))
 const segmentSizeShift = 8
 const segmentSize = 1 << segmentSizeShift
 const segmentIndexMask = segmentSize - 1
@@ -109,10 +114,82 @@ func consumeCPU(tokens int) {
 	if t == 42 { atomic.StoreInt32(&consumedCPU, consumedCPU + int32(t)) }
 }
 
-func (c* LFChan) sendOrReceiveSuspend(element unsafe.Pointer) unsafe.Pointer {
-	backoff := 4
+
+func (c* LFChan) sendOrReceiveFC(element unsafe.Pointer, cont unsafe.Pointer) unsafe.Pointer {
 	try_again: for { // CAS-loop
 		enqIdx := c.enqIdx()
+		deqIdx := c.deqIdx()
+		if enqIdx < deqIdx {
+			continue try_again
+		}
+		// Check if queue is empty
+		if deqIdx == enqIdx {
+			if c.addToWaitingQueue2(enqIdx, element, cont) {
+				return ParkResult
+			} else {
+				continue try_again
+			}
+		} else {
+			// Queue is not empty
+			head := c.getHead()
+			headId := head.id
+			if deqIdx < segmentSize * headId {
+				c.casDeqIdx(deqIdx, segmentSize * headId)
+				continue try_again
+			}
+			deqIdxNodeId := nodeId(deqIdx)
+			// Check that deqI dx is not outdated
+			if headId > deqIdxNodeId {
+				continue try_again
+			}
+			// Check that head pointer should be moved forward
+			if headId < deqIdxNodeId {
+				headNext := head.next()
+				headNextNode := (*node) (headNext)
+				headNextNode._prev = nil
+				c.casHead(head, headNext)
+				continue try_again
+			}
+			// Read the first element
+			deqIdxInNode := indexInNode(deqIdx)
+			firstElement := c.readElement(head, deqIdxInNode)
+			// Check that the element is not taken already.
+			if firstElement == takenElement {
+				c.casDeqIdx(deqIdx, deqIdx + 1)
+				continue try_again
+			}
+			// Decide should we make a rendezvous or not
+			makeRendezvous := (element == ReceiverElement && firstElement != ReceiverElement) || (element != ReceiverElement && firstElement == ReceiverElement)
+			//deqIdxLimit := enqIdx
+			if makeRendezvous {
+				if c.tryResumeContinuation(head, deqIdxInNode, deqIdx, element) {
+					return firstElement
+				} else {
+					continue try_again
+				}
+			} else {
+				//for {
+					if c.addToWaitingQueue2(enqIdx, element, cont) {
+						return ParkResult
+					}
+					//enqIdx = c.enqIdx()
+					//deqIdx = c.deqIdx()
+					//if deqIdx >= deqIdxLimit {
+					//	continue try_again
+					//}
+				//}
+			}
+		}
+	}
+}
+
+func (c* LFChan) sendOrReceiveSuspend(element unsafe.Pointer) unsafe.Pointer {
+	fc := 0
+	try_again: for { // CAS-loop
+		if fc > 3 {
+			return c.fcq.addTaskAndCombine(element, runtime.GetGoroutine())
+		}
+ 		enqIdx := c.enqIdx()
 		deqIdx := c.deqIdx()
 		if enqIdx < deqIdx {
 			continue try_again
@@ -122,9 +199,7 @@ func (c* LFChan) sendOrReceiveSuspend(element unsafe.Pointer) unsafe.Pointer {
 			if c.addToWaitingQueue2(enqIdx, element, nil) {
 				return parkAndThenReturn()
 			} else {
-				backoff *= 2
-				backoff &= maxBackoffMask
-				consumeCPU(backoff)
+				fc++
 				continue try_again
 			}
 		} else {
@@ -163,9 +238,7 @@ func (c* LFChan) sendOrReceiveSuspend(element unsafe.Pointer) unsafe.Pointer {
 				if c.tryResumeContinuation(head, deqIdxInNode, deqIdx, element) {
 					return firstElement
 				} else {
-					backoff *= 2
-					backoff &= maxBackoffMask
-					consumeCPU(backoff)
+					fc++
 					continue try_again
 				}
 			} else {
@@ -176,9 +249,7 @@ func (c* LFChan) sendOrReceiveSuspend(element unsafe.Pointer) unsafe.Pointer {
 					enqIdx = c.enqIdx()
 					deqIdx = c.deqIdx()
 					if deqIdx >= deqIdxLimit {
-						backoff *= 2
-						backoff &= maxBackoffMask
-						consumeCPU(backoff)
+						fc++
 						continue try_again
 					}
 				}
