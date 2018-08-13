@@ -274,42 +274,26 @@ func (c* LFChan) sendOrReceive(element unsafe.Pointer) unsafe.Pointer {
 			}
 			// Decide should we make a rendezvous or not
 			makeRendezvous := (element == ReceiverElement && firstElement != ReceiverElement) || (element != ReceiverElement && firstElement == ReceiverElement)
-			deqIdxLimit := enqIdx
 			if makeRendezvous {
 				for {
 					if c.tryResumeContinuation(head, deqIdxInNode, deqIdx, element) {
 						return firstElement
-					}
-					read_state: for {
-						deqIdx = c.deqIdx()
-						deqIdxNodeId = nodeId(deqIdx)
-						deqIdxInNode = indexInNode(deqIdx)
-						if deqIdx >= deqIdxLimit {
-							fc++
-							backoff *= 2
-							backoff &= maxBackoffMask
-							ConsumeCPU(backoff)
-							if fc > FC_START {
-								return c.fcq.addTaskAndCombine(element, runtime.GetGoroutine())
-							}
-							continue try_again
+					} else {
+						fc++
+						backoff *= 2
+						backoff &= maxBackoffMask
+						ConsumeCPU(backoff)
+						if fc > FC_START {
+							return c.fcq.addTaskAndCombine(element, runtime.GetGoroutine())
 						}
-						for head.id < deqIdxNodeId { head = (*node) (head.next()) }
-						firstElement = c.readElement(head, deqIdxInNode)
-						if firstElement == takenElement {
-							c.casDeqIdx(deqIdx, deqIdx + 1)
-							continue read_state
-						}
+						continue try_again
 					}
 				}
 			} else {
 				for {
 					if c.addToWaitingQueue2(enqIdx, element, nil) {
 						return parkAndThenReturn()
-					}
-					enqIdx = c.enqIdx()
-					deqIdx = c.deqIdx()
-					if deqIdx >= deqIdxLimit {
+					} else {
 						fc++
 						backoff *= 2
 						backoff &= maxBackoffMask
