@@ -123,6 +123,7 @@ func (c* LFChan) sendOrReceiveSuspend(element unsafe.Pointer) unsafe.Pointer {
 				parkAndThenReturn()
 			} else {
 				backoff *= 2
+				backoff &= maxBackoffMask
 				consumeCPU(backoff)
 				continue try_again
 			}
@@ -133,6 +134,7 @@ func (c* LFChan) sendOrReceiveSuspend(element unsafe.Pointer) unsafe.Pointer {
 			if deqIdx < segmentSize * headId {
 				c.casDeqIdx(deqIdx, segmentSize * headId)
 				backoff *= 2
+				backoff &= maxBackoffMask
 				consumeCPU(backoff)
 				continue try_again
 			}
@@ -140,6 +142,7 @@ func (c* LFChan) sendOrReceiveSuspend(element unsafe.Pointer) unsafe.Pointer {
 			// Check that deqI dx is not outdated
 			if headId > deqIdxNodeId {
 				backoff *= 2
+				backoff &= maxBackoffMask
 				consumeCPU(backoff)
 				continue try_again
 			}
@@ -150,6 +153,7 @@ func (c* LFChan) sendOrReceiveSuspend(element unsafe.Pointer) unsafe.Pointer {
 				headNextNode._prev = nil
 				c.casHead(head, headNext)
 				backoff *= 2
+				backoff &= maxBackoffMask
 				consumeCPU(backoff)
 				continue try_again
 			}
@@ -160,6 +164,7 @@ func (c* LFChan) sendOrReceiveSuspend(element unsafe.Pointer) unsafe.Pointer {
 			if firstElement == takenElement {
 				c.casDeqIdx(deqIdx, deqIdx + 1)
 				backoff *= 2
+				backoff &= maxBackoffMask
 				consumeCPU(backoff)
 				continue try_again
 			}
@@ -171,6 +176,7 @@ func (c* LFChan) sendOrReceiveSuspend(element unsafe.Pointer) unsafe.Pointer {
 					return firstElement
 				} else {
 					backoff *= 2
+					backoff &= maxBackoffMask
 					consumeCPU(backoff)
 					continue try_again
 				}
@@ -183,6 +189,7 @@ func (c* LFChan) sendOrReceiveSuspend(element unsafe.Pointer) unsafe.Pointer {
 					deqIdx = c.deqIdx()
 					if deqIdx >= deqIdxLimit {
 						backoff *= 2
+						backoff &= maxBackoffMask
 						consumeCPU(backoff)
 						continue try_again
 					}
@@ -200,17 +207,16 @@ func (c *LFChan) readElement(node *node, index int32) unsafe.Pointer {
 	// Element index in `Node#_data` array
 	// Spin wait on the slot
 	elementAddr := &node._data[index * 2]
-	element := atomic.LoadPointer(elementAddr) // volatile read
 	var attempt = 0
 	for {
 		if attempt % 32 == 0 {
+			element := atomic.LoadPointer(elementAddr) // volatile read
 			if element != nil {
 				return element
 			}
 			if attempt >= c.spinThreshold {
 				break
 			}
-			element = atomic.LoadPointer(elementAddr) // volatile read
 		}
 		attempt++
 	}
