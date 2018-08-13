@@ -186,19 +186,19 @@ func (c* LFChan) sendOrReceiveFC(element unsafe.Pointer, cont unsafe.Pointer) un
 const FC_START = 100
 
 func (c* LFChan) sendOrReceive(element unsafe.Pointer) unsafe.Pointer {
-	//fc := 0
+	fc := 0
 	backoff := 2
 	try_again: for { // CAS-loop
  		enqIdx := c.enqIdx()
 		deqIdx := c.deqIdx()
 		if enqIdx < deqIdx {
-			//fc++
+			fc++
 			backoff *= 2
 			backoff &= maxBackoffMask
 			ConsumeCPU(backoff)
-			//if fc > FC_START {
-			//	return c.fcq.addTaskAndCombine(element, runtime.GetGoroutine())
-			//}
+			if fc > FC_START {
+				return c.fcq.addTaskAndCombine(element, runtime.GetGoroutine())
+			}
 			continue try_again
 		}
 		// Check if queue is empty
@@ -206,13 +206,13 @@ func (c* LFChan) sendOrReceive(element unsafe.Pointer) unsafe.Pointer {
 			if c.addToWaitingQueue2(enqIdx, element, nil) {
 				return parkAndThenReturn()
 			} else {
-				//fc++
+				fc++
 				backoff *= 2
 				backoff &= maxBackoffMask
 				ConsumeCPU(backoff)
-				//if fc > FC_START {
-				//	return c.fcq.addTaskAndCombine(element, runtime.GetGoroutine())
-				//}
+				if fc > FC_START {
+					return c.fcq.addTaskAndCombine(element, runtime.GetGoroutine())
+				}
 				continue try_again
 			}
 		} else {
@@ -221,25 +221,25 @@ func (c* LFChan) sendOrReceive(element unsafe.Pointer) unsafe.Pointer {
 			headId := head.id
 			if deqIdx < segmentSize * headId {
 				c.casDeqIdx(deqIdx, segmentSize * headId)
-				//fc++
+				fc++
 				backoff *= 2
 				backoff &= maxBackoffMask
 				ConsumeCPU(backoff)
-				//if fc > FC_START {
-				//	return c.fcq.addTaskAndCombine(element, runtime.GetGoroutine())
-				//}
+				if fc > FC_START {
+					return c.fcq.addTaskAndCombine(element, runtime.GetGoroutine())
+				}
 				continue try_again
 			}
 			deqIdxNodeId := nodeId(deqIdx)
 			// Check that deqI dx is not outdated
 			if headId > deqIdxNodeId {
-				//fc++
+				fc++
 				backoff *= 2
 				backoff &= maxBackoffMask
 				ConsumeCPU(backoff)
-				//if fc > FC_START {
-				//	return c.fcq.addTaskAndCombine(element, runtime.GetGoroutine())
-				//}
+				if fc > FC_START {
+					return c.fcq.addTaskAndCombine(element, runtime.GetGoroutine())
+				}
 				continue try_again
 			}
 			// Check that head pointer should be moved forward
@@ -248,13 +248,13 @@ func (c* LFChan) sendOrReceive(element unsafe.Pointer) unsafe.Pointer {
 				headNextNode := (*node) (headNext)
 				headNextNode._prev = nil
 				c.casHead(head, headNext)
-				//fc++
+				fc++
 				backoff *= 2
 				backoff &= maxBackoffMask
 				ConsumeCPU(backoff)
-				//if fc > FC_START {
-				//	return c.fcq.addTaskAndCombine(element, runtime.GetGoroutine())
-				//}
+				if fc > FC_START {
+					return c.fcq.addTaskAndCombine(element, runtime.GetGoroutine())
+				}
 				continue try_again
 			}
 			// Read the first element
@@ -263,13 +263,13 @@ func (c* LFChan) sendOrReceive(element unsafe.Pointer) unsafe.Pointer {
 			// Check that the element is not taken already.
 			if firstElement == takenElement {
 				c.casDeqIdx(deqIdx, deqIdx + 1)
-				//fc++
+				fc++
 				backoff *= 2
 				backoff &= maxBackoffMask
 				ConsumeCPU(backoff)
-				//if fc > FC_START {
-				//	return c.fcq.addTaskAndCombine(element, runtime.GetGoroutine())
-				//}
+				if fc > FC_START {
+					return c.fcq.addTaskAndCombine(element, runtime.GetGoroutine())
+				}
 				continue try_again
 			}
 			// Decide should we make a rendezvous or not
@@ -279,13 +279,13 @@ func (c* LFChan) sendOrReceive(element unsafe.Pointer) unsafe.Pointer {
 					if c.tryResumeContinuation(head, deqIdxInNode, deqIdx, element) {
 						return firstElement
 					} else {
-						//fc++
+						fc++
 						backoff *= 2
 						backoff &= maxBackoffMask
 						ConsumeCPU(backoff)
-						//if fc > FC_START {
-						//	return c.fcq.addTaskAndCombine(element, runtime.GetGoroutine())
-						//}
+						if fc > FC_START {
+							return c.fcq.addTaskAndCombine(element, runtime.GetGoroutine())
+						}
 						continue try_again
 					}
 				}
@@ -294,13 +294,13 @@ func (c* LFChan) sendOrReceive(element unsafe.Pointer) unsafe.Pointer {
 					if c.addToWaitingQueue2(enqIdx, element, nil) {
 						return parkAndThenReturn()
 					} else {
-						//fc++
+						fc++
 						backoff *= 2
 						backoff &= maxBackoffMask
 						ConsumeCPU(backoff)
-						//if fc > FC_START {
-						//	return c.fcq.addTaskAndCombine(element, runtime.GetGoroutine())
-						//}
+						if fc > FC_START {
+							return c.fcq.addTaskAndCombine(element, runtime.GetGoroutine())
+						}
 						continue try_again
 					}
 				}
