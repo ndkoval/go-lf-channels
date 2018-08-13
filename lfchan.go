@@ -96,11 +96,11 @@ var selectIdGen int64 = 0
 
 
 func (c *LFChan) Send(element unsafe.Pointer) {
-	c.sendOrReceiveSuspend(element)
+	c.sendOrReceive(element)
 }
 
 func (c *LFChan) Receive() unsafe.Pointer {
-	return c.sendOrReceiveSuspend(ReceiverElement)
+	return c.sendOrReceive(ReceiverElement)
 }
 
 const maxBackoffMask = 0x111111111111
@@ -183,10 +183,13 @@ func (c* LFChan) sendOrReceiveFC(element unsafe.Pointer, cont unsafe.Pointer) un
 	}
 }
 
-func (c* LFChan) sendOrReceiveSuspend(element unsafe.Pointer) unsafe.Pointer {
+func (c* LFChan) sendOrReceive(element unsafe.Pointer) unsafe.Pointer {
 	fc := 0
 	backoff := 4
 	try_again: for { // CAS-loop
+		fc++
+		backoff *= 2
+		ConsumeCPU(backoff)
 		if fc > 8 {
 			return c.fcq.addTaskAndCombine(element, runtime.GetGoroutine())
 		}
@@ -200,9 +203,6 @@ func (c* LFChan) sendOrReceiveSuspend(element unsafe.Pointer) unsafe.Pointer {
 			if c.addToWaitingQueue2(enqIdx, element, nil) {
 				return parkAndThenReturn()
 			} else {
-				fc++
-				backoff *= 2
-				ConsumeCPU(backoff)
 				continue try_again
 			}
 		} else {
@@ -232,22 +232,30 @@ func (c* LFChan) sendOrReceiveSuspend(element unsafe.Pointer) unsafe.Pointer {
 			// Check that the element is not taken already.
 			if firstElement == takenElement {
 				c.casDeqIdx(deqIdx, deqIdx + 1)
-				fc++
-				backoff *= 2
-				ConsumeCPU(backoff)
 				continue try_again
 			}
 			// Decide should we make a rendezvous or not
 			makeRendezvous := (element == ReceiverElement && firstElement != ReceiverElement) || (element != ReceiverElement && firstElement == ReceiverElement)
 			deqIdxLimit := enqIdx
 			if makeRendezvous {
-				if c.tryResumeContinuation(head, deqIdxInNode, deqIdx, element) {
-					return firstElement
-				} else {
-					fc++
-					backoff *= 2
-					ConsumeCPU(backoff)
-					continue try_again
+				for {
+					if c.tryResumeContinuation(head, deqIdxInNode, deqIdx, element) {
+						return firstElement
+					}
+					read_state: for {
+						deqIdx = c.deqIdx()
+						deqIdxNodeId = nodeId(deqIdx)
+						deqIdxInNode = indexInNode(deqIdx)
+						if deqIdx >= deqIdxLimit {
+							continue try_again
+						}
+						for head.id < deqIdxNodeId { head = (*node) (head.next()) }
+						firstElement = c.readElement(head, deqIdxInNode)
+						if firstElement == takenElement {
+							c.casDeqIdx(deqIdx, deqIdx + 1)
+							continue read_state
+						}
+					}
 				}
 			} else {
 				for {
@@ -257,9 +265,6 @@ func (c* LFChan) sendOrReceiveSuspend(element unsafe.Pointer) unsafe.Pointer {
 					enqIdx = c.enqIdx()
 					deqIdx = c.deqIdx()
 					if deqIdx >= deqIdxLimit {
-						fc++
-						backoff *= 2
-						ConsumeCPU(backoff)
 						continue try_again
 					}
 				}
