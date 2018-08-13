@@ -185,15 +185,16 @@ func (c* LFChan) sendOrReceiveFC(element unsafe.Pointer, cont unsafe.Pointer) un
 
 func (c* LFChan) sendOrReceive(element unsafe.Pointer) unsafe.Pointer {
 	fc := 0
-	backoff := 4
+	backoff := 2
 	try_again: for { // CAS-loop
  		enqIdx := c.enqIdx()
 		deqIdx := c.deqIdx()
 		if enqIdx < deqIdx {
 			fc++
 			backoff *= 2
+			backoff &= maxBackoffMask
 			ConsumeCPU(backoff)
-			if fc > 8 {
+			if fc > 100 {
 				return c.fcq.addTaskAndCombine(element, runtime.GetGoroutine())
 			}
 			continue try_again
@@ -205,6 +206,7 @@ func (c* LFChan) sendOrReceive(element unsafe.Pointer) unsafe.Pointer {
 			} else {
 				fc++
 				backoff *= 2
+				backoff &= maxBackoffMask
 				ConsumeCPU(backoff)
 				if fc > 8 {
 					return c.fcq.addTaskAndCombine(element, runtime.GetGoroutine())
@@ -219,6 +221,7 @@ func (c* LFChan) sendOrReceive(element unsafe.Pointer) unsafe.Pointer {
 				c.casDeqIdx(deqIdx, segmentSize * headId)
 				fc++
 				backoff *= 2
+				backoff &= maxBackoffMask
 				ConsumeCPU(backoff)
 				if fc > 8 {
 					return c.fcq.addTaskAndCombine(element, runtime.GetGoroutine())
@@ -230,6 +233,7 @@ func (c* LFChan) sendOrReceive(element unsafe.Pointer) unsafe.Pointer {
 			if headId > deqIdxNodeId {
 				fc++
 				backoff *= 2
+				backoff &= maxBackoffMask
 				ConsumeCPU(backoff)
 				if fc > 8 {
 					return c.fcq.addTaskAndCombine(element, runtime.GetGoroutine())
@@ -244,6 +248,7 @@ func (c* LFChan) sendOrReceive(element unsafe.Pointer) unsafe.Pointer {
 				c.casHead(head, headNext)
 				fc++
 				backoff *= 2
+				backoff &= maxBackoffMask
 				ConsumeCPU(backoff)
 				if fc > 8 {
 					return c.fcq.addTaskAndCombine(element, runtime.GetGoroutine())
@@ -258,6 +263,7 @@ func (c* LFChan) sendOrReceive(element unsafe.Pointer) unsafe.Pointer {
 				c.casDeqIdx(deqIdx, deqIdx + 1)
 				fc++
 				backoff *= 2
+				backoff &= maxBackoffMask
 				ConsumeCPU(backoff)
 				if fc > 8 {
 					return c.fcq.addTaskAndCombine(element, runtime.GetGoroutine())
@@ -279,6 +285,7 @@ func (c* LFChan) sendOrReceive(element unsafe.Pointer) unsafe.Pointer {
 						if deqIdx >= deqIdxLimit {
 							fc++
 							backoff *= 2
+							backoff &= maxBackoffMask
 							ConsumeCPU(backoff)
 							if fc > 8 {
 								return c.fcq.addTaskAndCombine(element, runtime.GetGoroutine())
@@ -303,6 +310,7 @@ func (c* LFChan) sendOrReceive(element unsafe.Pointer) unsafe.Pointer {
 					if deqIdx >= deqIdxLimit {
 						fc++
 						backoff *= 2
+						backoff &= maxBackoffMask
 						ConsumeCPU(backoff)
 						if fc > 8 {
 							return c.fcq.addTaskAndCombine(element, runtime.GetGoroutine())
