@@ -120,7 +120,7 @@ func (c* LFChan) sendOrReceiveSuspend(element unsafe.Pointer) unsafe.Pointer {
 		// Check if queue is empty
 		if deqIdx == enqIdx {
 			if c.addToWaitingQueue2(enqIdx, element, nil) {
-				parkAndThenReturn()
+				return parkAndThenReturn()
 			} else {
 				backoff *= 2
 				backoff &= maxBackoffMask
@@ -183,7 +183,7 @@ func (c* LFChan) sendOrReceiveSuspend(element unsafe.Pointer) unsafe.Pointer {
 			} else {
 				for {
 					if c.addToWaitingQueue2(enqIdx, element, nil) {
-						parkAndThenReturn()
+						return parkAndThenReturn()
 					}
 					enqIdx = c.enqIdx()
 					deqIdx = c.deqIdx()
