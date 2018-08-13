@@ -4,9 +4,6 @@ import (
 	"testing"
 	"sync"
 	"unsafe"
-	"time"
-	"runtime/pprof"
-	"os"
 )
 
 func TestSimple(t *testing.T) {
@@ -168,10 +165,10 @@ func TestStressWithSelectOnReceive(t *testing.T) {
 			}
 		}()
 	}
-	go func() {
-		time.Sleep(3 * time.Second)
-		pprof.Lookup("goroutine").WriteTo(os.Stdout, 1)
-	}()
+	//go func() {
+	//	time.Sleep(3 * time.Second)
+	//	pprof.Lookup("goroutine").WriteTo(os.Stdout, 1)
+	//}()
 	wg.Wait()
 }
 

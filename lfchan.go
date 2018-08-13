@@ -114,9 +114,8 @@ func (c* LFChan) sendOrReceiveSuspend(element unsafe.Pointer) unsafe.Pointer {
 		if enqIdx < deqIdx { continue try_again }
 		// Check if queue is empty
 		if deqIdx == enqIdx {
-			addSuccess, _ := c.addToWaitingQueue(enqIdx, element, nil)
-			if addSuccess {
-				return parkAndThenReturn()
+			if c.addToWaitingQueue2(enqIdx, element, nil) {
+				parkAndThenReturn()
 			} else { continue try_again }
 		} else {
 			// Queue is not empty
@@ -156,9 +155,8 @@ func (c* LFChan) sendOrReceiveSuspend(element unsafe.Pointer) unsafe.Pointer {
 				} else { continue try_again }
 			} else {
 				for {
-					addSuccess, _ := c.addToWaitingQueue(enqIdx, element, nil)
-					if addSuccess {
-						return parkAndThenReturn()
+					if c.addToWaitingQueue2(enqIdx, element, nil) {
+						parkAndThenReturn()
 					} else { continue try_again }
 					enqIdx = c.enqIdx()
 					deqIdx = c.deqIdx()
@@ -228,6 +226,33 @@ func (c *LFChan) addToWaitingQueue(enqIdx int64, element unsafe.Pointer, cont un
 	} else { return false, RegInfo{} }
 }
 
+func (c *LFChan) addToWaitingQueue2(enqIdx int64, element unsafe.Pointer, cont unsafe.Pointer) bool {
+	// Count enqIdx parts
+	enqIdxNodeId := nodeId(enqIdx)
+	enqIdxInNode := indexInNode(enqIdx)
+	// Read tail and its id
+	tail := c.getTail()
+	tailId := tail.id
+	// Check if enqIdx is not outdated
+	if tailId > enqIdxNodeId { return false }
+	// Check if we should help with a new node adding
+	if tailId == enqIdxNodeId && enqIdxInNode == 0 {
+		c.casEnqIdx(enqIdx, enqIdx + 1)
+		return false
+	}
+	// Get continuation if needed
+	if cont == nil { cont = runtime.GetGoroutine() }
+	// Check if a new node should be added
+	if tailId == enqIdxNodeId - 1 && enqIdxInNode == 0 {
+		return c.addNewNode2(tail, element, enqIdx, cont)
+	}
+	// Just check that `enqIdx` is valid and try to store the current
+	// goroutine into the `tail` by `enqIdxInNode`
+	if tailId != enqIdxNodeId { panic("Impossible!") }
+	if enqIdxInNode == 0 { panic("Impossible 2!") }
+	return c.storeContinuation(tail, enqIdxInNode, enqIdx, element, cont)
+}
+
 // Tries to read an element from the specified node
 // at the specified index. Returns the read element or
 // marks the slot as broken (sets `TAKEN_ELEMENT` to the slot)
@@ -258,6 +283,36 @@ func (c *LFChan) addNewNode(tail *node, element unsafe.Pointer, enqIdx int64, co
 			}
 			// Success, return true.
 			return true, newTail
+		} else { continue }
+	}
+}
+
+func (c *LFChan) addNewNode2(tail *node, element unsafe.Pointer, enqIdx int64, cont unsafe.Pointer) bool {
+	for {
+		// If next node is not null, help to move the tail pointer
+		tailNext := (*node) (tail.next())
+		if tailNext != nil {
+			// If this CAS fails, another thread moved the tail pointer
+			c.casTail(tail, tailNext)
+			c.casEnqIdx(enqIdx, enqIdx + 1) // help
+			return false
+		}
+		// Create a new node with this continuation and element and try to add it
+		newTail := newNode(tail.id + 1, tail)
+		newTail._data[0] = element
+		newTail._data[1] = cont
+		if tail.casNext(nil, unsafe.Pointer(newTail)) {
+			// New node added, try to move tail,
+			// if the CAS fails, another thread moved it.
+			c.casTail(tail, newTail)
+			c.casEnqIdx(enqIdx, enqIdx + 1) // help for others
+			// Remove the previous tail from the waiting queue
+			// if it was marked as logically removed.
+			if tail.isRemoved() {
+				tail.remove()
+			}
+			// Success, return true.
+			return true
 		} else { continue }
 	}
 }
@@ -640,33 +695,28 @@ func (n *node) isRemoved() bool {
 }
 
 func (n *node) remove() {
-	if (true) { return }
-	next := n.next()
+	if true { return }
+	next := (*node) (n.next())
 	if next == nil { return }
-	nextNode := (*node) (next)
-	for nextNode.isRemoved() {
-		newNext := nextNode.next()
+	for next.isRemoved() {
+		newNext := (*node) (next.next())
 		if newNext == nil { break }
 		next = newNext
-		nextNode = (*node) (next)
 	}
-	prev := n.prev()
-	prevNode := (*node) (prev)
+	prev := (*node) (n.prev())
 	for {
 		if prev == nil {
-			nextNode.movePrevLefter(nil)
+			next.movePrevLefter(nil)
 			return
 		}
-		if prevNode.isRemoved() {
-			prev = prevNode.prev()
-			prevNode = (*node) (prev)
+		if prev.isRemoved() {
+			prev = (*node) (prev.prev())
 			continue
 		}
-		prevNode.moveNextRighter(nextNode)
-		nextNode.movePrevLefter(prevNode)
-		if nextNode.isRemoved() || !prevNode.isRemoved() { return }
-		prev = prevNode.prev()
-		prevNode = (*node) (prev)
+		prev.moveNextRighter(next)
+		next.movePrevLefter(prev)
+		if next.isRemoved() || !prev.isRemoved() { return }
+		prev = (*node) (prev.prev())
 	}
 }
 
