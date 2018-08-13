@@ -83,7 +83,7 @@ const FAILED = 2
 var takenContinuation = (unsafe.Pointer) ((uintptr) (1))
 var takenElement = (unsafe.Pointer) ((uintptr) (2))
 var ReceiverElement = (unsafe.Pointer) ((uintptr) (4096))
-const segmentSize = 32
+const segmentSize = 64
 
 var selectIdGen int64 = 0
 
@@ -96,7 +96,7 @@ func (c *LFChan) Receive() unsafe.Pointer {
 	return c.sendOrReceiveSuspend(ReceiverElement)
 }
 
-const maxBackoffMask = 1 << 10
+const maxBackoffMask = 0x11111111111
 var consumedCPU = int32(time.Now().Unix())
 
 func consumeCPU(tokens int) {
@@ -209,7 +209,7 @@ func (c *LFChan) readElement(node *node, index int32) unsafe.Pointer {
 	elementAddr := &node._data[index * 2]
 	var attempt = 0
 	for {
-		if attempt % 16 == 0 {
+		if attempt % 8 == 0 {
 			element := atomic.LoadPointer(elementAddr) // volatile read
 			if element != nil {
 				return element
