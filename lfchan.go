@@ -113,8 +113,6 @@ func (c* LFChan) sendOrReceiveSuspend(element unsafe.Pointer) unsafe.Pointer {
 		enqIdx := c.enqIdx()
 		deqIdx := c.deqIdx()
 		if enqIdx < deqIdx {
-			backoff *= 2
-			consumeCPU(backoff)
 			continue try_again
 		}
 		// Check if queue is empty
@@ -133,17 +131,11 @@ func (c* LFChan) sendOrReceiveSuspend(element unsafe.Pointer) unsafe.Pointer {
 			headId := head.id
 			if deqIdx < segmentSize * headId {
 				c.casDeqIdx(deqIdx, segmentSize * headId)
-				backoff *= 2
-				backoff &= maxBackoffMask
-				consumeCPU(backoff)
 				continue try_again
 			}
 			deqIdxNodeId := nodeId(deqIdx)
 			// Check that deqI dx is not outdated
 			if headId > deqIdxNodeId {
-				backoff *= 2
-				backoff &= maxBackoffMask
-				consumeCPU(backoff)
 				continue try_again
 			}
 			// Check that head pointer should be moved forward
@@ -152,9 +144,6 @@ func (c* LFChan) sendOrReceiveSuspend(element unsafe.Pointer) unsafe.Pointer {
 				headNextNode := (*node) (headNext)
 				headNextNode._prev = nil
 				c.casHead(head, headNext)
-				backoff *= 2
-				backoff &= maxBackoffMask
-				consumeCPU(backoff)
 				continue try_again
 			}
 			// Read the first element
@@ -163,9 +152,6 @@ func (c* LFChan) sendOrReceiveSuspend(element unsafe.Pointer) unsafe.Pointer {
 			// Check that the element is not taken already.
 			if firstElement == takenElement {
 				c.casDeqIdx(deqIdx, deqIdx + 1)
-				backoff *= 2
-				backoff &= maxBackoffMask
-				consumeCPU(backoff)
 				continue try_again
 			}
 			// Decide should we make a rendezvous or not
