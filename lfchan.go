@@ -106,7 +106,7 @@ func (c *LFChan) Receive() unsafe.Pointer {
 const maxBackoffMask = 0x111111111111
 var consumedCPU = int32(time.Now().Unix())
 
-func consumeCPU(tokens int) {
+func ConsumeCPU(tokens int) {
 	t := int(atomic.LoadInt32(&consumedCPU)) // volatile read
 	for i := tokens; i > 0; i-- {
 		t += (t * 0x5DEECE66D + 0xB + i) & (0xFFFFFFFFFFFF)
