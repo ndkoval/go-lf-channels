@@ -103,7 +103,7 @@ func (c *LFChan) Receive() unsafe.Pointer {
 	return c.sendOrReceive(ReceiverElement)
 }
 
-const maxBackoffMask = 0x111111111111
+const maxBackoffMask = 0x11111111111
 var consumedCPU = int32(time.Now().Unix())
 
 func ConsumeCPU(tokens int) {
@@ -289,7 +289,7 @@ func (c* LFChan) sendOrReceive(element unsafe.Pointer) unsafe.Pointer {
 							backoff *= 2
 							backoff &= maxBackoffMask
 							ConsumeCPU(backoff)
-							if fc > 8 {
+							if fc > FC_START {
 								return c.fcq.addTaskAndCombine(element, runtime.GetGoroutine())
 							}
 							continue try_again
@@ -314,7 +314,7 @@ func (c* LFChan) sendOrReceive(element unsafe.Pointer) unsafe.Pointer {
 						backoff *= 2
 						backoff &= maxBackoffMask
 						ConsumeCPU(backoff)
-						if fc > 8 {
+						if fc > FC_START {
 							return c.fcq.addTaskAndCombine(element, runtime.GetGoroutine())
 						}
 						continue try_again
