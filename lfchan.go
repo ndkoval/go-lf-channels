@@ -1,4 +1,4 @@
-package go_lf_channels
+package main
 
 import (
 	"sync/atomic"
