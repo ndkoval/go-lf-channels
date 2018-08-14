@@ -7,11 +7,27 @@ import (
 	"runtime"
 	"unsafe"
 	"os"
+	"log"
+	"runtime/pprof"
 )
 
-func BenchmarkN1(b *testing.B) {
+const useProfiler = true
 
+func setupProfiler(channels int, threads int) {
+	if useProfiler {
+		runtime.SetCPUProfileRate(1000)
+		runtime.GOMAXPROCS(1)
+		f, err := os.Create("cur_ch" + string(channels) + "t" + string(threads))
+		if err != nil {
+			log.Fatal(err)
+		}
+		pprof.StartCPUProfile(f)
+	}
 }
+
+//func BenchmarkN1(b *testing.B) {
+//
+//}
 
 const kovalAlgo = true
 func BenchmarkNN(b *testing.B) {
@@ -41,11 +57,15 @@ func BenchmarkNN(b *testing.B) {
 						// Then run benchmarks
 						for times := 0; times < 10; times++ {
 							runtime.GC()
+							setupProfiler(channels, parallelism)
 							b.Run(fmt.Sprintf("withSelect=%t/channels=%d/goroutines=%d/parallelism=%d",
 								withSelect, channels, goroutines, parallelism),
 								func(b *testing.B) {
 									runBenchmark(b, producers, consumers, channels, parallelism, withSelect, kovalAlgo, spin)
 								})
+							if useProfiler {
+								pprof.StopCPUProfile()
+							}
 						}
 					}
 				}
@@ -203,10 +223,13 @@ func goroutinesFactor() int {
 }
 
 const minBatchSize = 100000
-var parallelism = []int{1, 2, 4, 6, 8, 12, 16, 18, 24, 32, 36, 48, 64, 72, 96, 108, 128, 144}
+//var parallelism = []int{1, 2, 4, 6, 8, 12, 16, 18, 24, 32, 36, 48, 64, 72, 96, 108, 128, 144}
+var parallelism = []int{1, 2, 4, 8, 16, 24, 32, 64, 96, 128, 144}
 var contentionFactor = []int{1, 10}
 //var contentionFactor = []int{1, 2, 4, 8, 16, 32}
-var goroutines = []int{0, goroutinesFactor()}
+var goroutines = []int{0}
+//var goroutines = []int{0, goroutinesFactor()}
 //var goroutines = []int{0, goroutinesFactor(), goroutinesFactor() * 10, goroutinesFactor() * 100}
 
-var spins = []int{0, 50, 100, 200, 300, 500, 700, 1000, 1300, 1600, 2000, 2500, 3000, 4000, 6000, 10000, 2147483647}
+var spins = []int{300}
+//var spins = []int{0, 50, 100, 200, 300, 500, 700, 1000, 1300, 1600, 2000, 2500, 3000, 4000, 6000, 10000, 2147483647}

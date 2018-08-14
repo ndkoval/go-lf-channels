@@ -88,7 +88,7 @@ var takenContinuation = (unsafe.Pointer) ((uintptr) (1))
 var takenElement = (unsafe.Pointer) ((uintptr) (2))
 var ReceiverElement = (unsafe.Pointer) ((uintptr) (4096))
 var ParkResult = (unsafe.Pointer) ((uintptr) (4097))
-const segmentSizeShift = 6
+const segmentSizeShift = 5
 const segmentSize = 1 << segmentSizeShift
 const segmentIndexMask = segmentSize - 1
 
@@ -116,10 +116,14 @@ func ConsumeCPU(tokens int) {
 
 
 func (c* LFChan) sendOrReceiveFC(element unsafe.Pointer, cont unsafe.Pointer) unsafe.Pointer {
+	backoff := 1
 	try_again: for { // CAS-loop
 		enqIdx := c.enqIdx()
 		deqIdx := c.deqIdx()
 		if enqIdx < deqIdx {
+			backoff *= 2
+			backoff &= maxBackoffMask
+			ConsumeCPU(backoff)
 			continue try_again
 		}
 		// Check if queue is empty
@@ -127,63 +131,71 @@ func (c* LFChan) sendOrReceiveFC(element unsafe.Pointer, cont unsafe.Pointer) un
 			if c.addToWaitingQueue2(enqIdx, element, cont) {
 				return ParkResult
 			} else {
+				backoff *= 2
+				backoff &= maxBackoffMask
+				ConsumeCPU(backoff)
 				continue try_again
 			}
 		} else {
 			// Queue is not empty
 			head := c.getHead()
 			headId := head.id
-			if deqIdx < segmentSize * headId {
-				c.casDeqIdx(deqIdx, segmentSize * headId)
-				continue try_again
-			}
+			// check consistency
 			deqIdxNodeId := nodeId(deqIdx)
-			// Check that deqI dx is not outdated
-			if headId > deqIdxNodeId {
-				continue try_again
-			}
-			// Check that head pointer should be moved forward
-			if headId < deqIdxNodeId {
-				headNext := head.next()
-				headNextNode := (*node) (headNext)
-				headNextNode._prev = nil
-				c.casHead(head, headNext)
+			if headId != deqIdxNodeId {
+				if headId < deqIdxNodeId {
+					headNext := head.next()
+					headNextNode := (*node) (headNext)
+					headNextNode._prev = nil
+					c.casHead(head, headNext)
+				} else {
+					c.casDeqIdx(deqIdx, headId << segmentSizeShift)
+				}
 				continue try_again
 			}
 			// Read the first element
-			deqIdxInNode := indexInNode(deqIdx)
-			firstElement := c.readElement(head, deqIdxInNode)
+			deqIndexInHead := indexInNode(deqIdx)
+			firstElement := c.readElement(head, deqIndexInHead)
 			// Check that the element is not taken already.
 			if firstElement == takenElement {
 				c.casDeqIdx(deqIdx, deqIdx + 1)
+				backoff *= 2
+				backoff &= maxBackoffMask
+				ConsumeCPU(backoff)
 				continue try_again
 			}
 			// Decide should we make a rendezvous or not
-			makeRendezvous := (element == ReceiverElement && firstElement != ReceiverElement) || (element != ReceiverElement && firstElement == ReceiverElement)
-			//deqIdxLimit := enqIdx
+			makeRendezvous := (element == ReceiverElement) != (firstElement == ReceiverElement)
 			if makeRendezvous {
-				if c.tryResumeContinuation(head, deqIdxInNode, deqIdx, element) {
+				if c.tryResumeContinuation(head, deqIndexInHead, deqIdx, element) {
 					return firstElement
 				} else {
+					backoff *= 2
+					backoff &= maxBackoffMask
+					ConsumeCPU(backoff)
 					continue try_again
 				}
 			} else {
-				//for {
+				deqIdxLimit := enqIdx
+				for {
 					if c.addToWaitingQueue2(enqIdx, element, cont) {
 						return ParkResult
 					}
-					//enqIdx = c.enqIdx()
-					//deqIdx = c.deqIdx()
-					//if deqIdx >= deqIdxLimit {
-					//	continue try_again
-					//}
-				//}
+					enqIdx = c.enqIdx()
+					deqIdx = c.deqIdx()
+					if deqIdx >= deqIdxLimit {
+						backoff *= 2
+						backoff &= maxBackoffMask
+						ConsumeCPU(backoff)
+						continue try_again
+					}
+				}
 			}
 		}
 	}
 }
 
-const FC_START = 5
+const FC_START = 3
 
 func (c* LFChan) sendOrReceive(element unsafe.Pointer) unsafe.Pointer {
 	fc := 0
@@ -193,8 +205,6 @@ func (c* LFChan) sendOrReceive(element unsafe.Pointer) unsafe.Pointer {
 		deqIdx := c.deqIdx()
 		if enqIdx < deqIdx {
 			fc++
-			backoff *= 4
-			ConsumeCPU(backoff)
 			if fc > FC_START {
 				return c.fcq.addTaskAndCombine(element, runtime.GetGoroutine())
 			}
@@ -228,12 +238,6 @@ func (c* LFChan) sendOrReceive(element unsafe.Pointer) unsafe.Pointer {
 				} else {
 					c.casDeqIdx(deqIdx, headId << segmentSizeShift)
 				}
-				fc++
-				backoff *= 4
-				ConsumeCPU(backoff)
-				if fc > FC_START {
-					return c.fcq.addTaskAndCombine(element, runtime.GetGoroutine())
-				}
 				continue try_again
 			}
 			// Read the first element
@@ -265,16 +269,22 @@ func (c* LFChan) sendOrReceive(element unsafe.Pointer) unsafe.Pointer {
 					continue try_again
 				}
 			} else {
-				if c.addToWaitingQueue2(enqIdx, element, nil) {
-					return parkAndThenReturn()
-				} else {
-					fc++
-					backoff *= 4
-					ConsumeCPU(backoff)
-					if fc > FC_START {
-						return c.fcq.addTaskAndCombine(element, runtime.GetGoroutine())
+				deqIdxLimit := enqIdx
+				for {
+					if c.addToWaitingQueue2(enqIdx, element, nil) {
+						return parkAndThenReturn()
 					}
-					continue try_again
+					enqIdx = c.enqIdx()
+					deqIdx = c.deqIdx()
+					if deqIdx >= deqIdxLimit {
+						fc++
+						backoff *= 4
+						ConsumeCPU(backoff)
+						if fc > FC_START {
+							return c.fcq.addTaskAndCombine(element, runtime.GetGoroutine())
+						}
+						continue try_again
+					}
 				}
 			}
 		}
