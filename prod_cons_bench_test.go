@@ -17,7 +17,7 @@ func setupProfiler(channels int, threads int) {
 	if useProfiler {
 		runtime.SetCPUProfileRate(1000)
 		runtime.GOMAXPROCS(1)
-		f, err := os.Create("cur_ch" + string(channels) + "t" + string(threads))
+		f, err := os.Create(fmt.Sprintf("cur_ch%dt%d.pprof", channels, threads))
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -105,9 +105,9 @@ func runWithOneChannelGo(b *testing.B, wg *sync.WaitGroup, producers int, consum
 	c := make(chan int)
 	// Run producers
 	for i := 0; i < producers; i++ {
-		var dummyChan chan int
-		if withSelect { dummyChan = make(chan int) }
 		go func() {
+			var dummyChan chan int
+			if withSelect { dummyChan = make(chan int) }
 			defer wg.Done()
 			for j := 0; j < n / producers; j++ {
 				if withSelect {
@@ -118,6 +118,7 @@ func runWithOneChannelGo(b *testing.B, wg *sync.WaitGroup, producers int, consum
 				} else {
 					c <- j
 				}
+				ConsumeCPU(7)
 			}
 		}()
 	}
@@ -125,9 +126,9 @@ func runWithOneChannelGo(b *testing.B, wg *sync.WaitGroup, producers int, consum
 	for i := 0; i < consumers; i++ {
 		go func() {
 			defer wg.Done()
+			var dummyChan chan int
+			if withSelect { dummyChan = make(chan int) }
 			for j := 0; j < n / consumers; j++ {
-				var dummyChan chan int
-				if withSelect { dummyChan = make(chan int) }
 				if withSelect {
 					select {
 					case <- c: { /* do nothing */ }
@@ -136,6 +137,7 @@ func runWithOneChannelGo(b *testing.B, wg *sync.WaitGroup, producers int, consum
 				} else {
 					<- c
 				}
+				ConsumeCPU(7)
 			}
 		}()
 	}
@@ -145,10 +147,10 @@ func runWithOneChannelKoval(b *testing.B, wg *sync.WaitGroup, producers int, con
 	c := NewLFChan(spin)
 	// Run producers
 	for i := 0; i < producers; i++ {
-		var dummyChan *LFChan
-		if withSelect { dummyChan = NewLFChan(spin) }
 		go func() {
 			defer wg.Done()
+			var dummyChan *LFChan
+			if withSelect { dummyChan = NewLFChan(spin) }
 			for j := 0; j < n / producers; j++ {
 				if withSelect {
 					Select(
@@ -166,16 +168,18 @@ func runWithOneChannelKoval(b *testing.B, wg *sync.WaitGroup, producers int, con
 				} else {
 					c.SendInt(j)
 				}
+				ConsumeCPU(7)
 			}
 		}()
 	}
 	// Run consumers
 	for i := 0; i < consumers; i++ {
+
 		go func() {
 			defer wg.Done()
+			var dummyChan *LFChan
+			if withSelect { dummyChan = NewLFChan(spin) }
 			for j := 0; j < n / consumers; j++ {
-				var dummyChan *LFChan
-				if withSelect { dummyChan = NewLFChan(spin) }
 				if withSelect {
 					Select(
 						SelectAlternative{
@@ -192,7 +196,7 @@ func runWithOneChannelKoval(b *testing.B, wg *sync.WaitGroup, producers int, con
 				} else {
 					c.Receive()
 				}
-
+				ConsumeCPU(7)
 			}
 		}()
 	}
