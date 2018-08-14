@@ -3,7 +3,6 @@ package main
 import (
 	"testing"
 	"sync"
-	"unsafe"
 )
 
 func TestSimple(t *testing.T) {
@@ -16,7 +15,7 @@ func TestSimple(t *testing.T) {
 	x := c.ReceiveInt()
 	if x != 10 { t.Fatal("Expected ", 10, ", found ", x) }
 }
-
+/*
 func TestSimpleSendAndReceiveWithSelect(t *testing.T) {
 	c1 := NewLFChan(10)
 	c2 := NewLFChan(10)
@@ -90,7 +89,7 @@ func TestSimpleSelects(t *testing.T) {
 			},
 		)
 	}
-}
+}*/
 
 func TestStress(t *testing.T) {
 	n := 500000
@@ -102,7 +101,7 @@ func TestStress(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for i := 100; i < n; i++ {
+			for i := 0; i < n; i++ {
 				c.SendInt(i)
 			}
 		}()
@@ -112,7 +111,7 @@ func TestStress(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for i := 100; i < n; i++ {
+			for i := 0; i < n; i++ {
 				x := c.ReceiveInt()
 				if x != i {
 					//t.Fatal("Expected ", i, ", found ", x)
@@ -122,6 +121,7 @@ func TestStress(t *testing.T) {
 	}
 	wg.Wait()
 }
+/*
 
 func TestStressWithSelectOnReceive(t *testing.T) {
 	n := 500000
@@ -316,3 +316,4 @@ func TestCancellation(t *testing.T) {
 	//t.Fatal("Channel contains empy nodes which are niether head or tail")
 }
 
+*/
