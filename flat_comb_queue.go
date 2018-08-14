@@ -79,7 +79,7 @@ func (q *FCQueue) addTaskAndCombine(element unsafe.Pointer, cont unsafe.Pointer)
 	spin := 0
 	for atomic.LoadPointer(&node._data[idx * 2 + 1]) != nil {
 		if q.tryAcquireLock() {
-			q.combine()
+			q.combine(node, idx)
 			q._fclock = UNLOCKED
 			break
 		} else {
@@ -104,7 +104,7 @@ func (q *FCQueue) tryAcquireLock() bool {
 	return atomic.CompareAndSwapInt32(&q._fclock, UNLOCKED, LOCKED)
 }
 
-func (q *FCQueue) combine() {
+func (q *FCQueue) combine(limitNode *fcnode, limitIdx int32) {
 	head := (*fcnode) (q.head)
 	for {
 		if head.deqIdx >= atomic.LoadInt32(&head._enqIdx) && head.getNext() == nil { return }
@@ -122,7 +122,8 @@ func (q *FCQueue) combine() {
 		cont := head._data[idx * 2 + 1]
 		res := q.c.sendOrReceiveFC(element, cont)
 		head._data[idx * 2] = res
-		atomic.SwapPointer(&head._data[idx * 2 + 1], nil)
+		atomic.StorePointer(&head._data[idx * 2 + 1], nil)
+		if limitNode == head && limitIdx == idx { return }
 	}
 }
 
