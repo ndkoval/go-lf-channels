@@ -64,7 +64,6 @@ func BenchmarkNN(b *testing.B) {
 func runBenchmark(b *testing.B, producers int, consumers int, parallelism int, withSelect bool, work int) {
 	if useProfiler {
 		runtime.SetCPUProfileRate(1000)
-		runtime.GOMAXPROCS(1)
 		f, err := os.Create(fmt.Sprintf("cur_S%tT%dW%d.pprof", withSelect, parallelism, work))
 		if err != nil {
 			log.Fatal(err)
@@ -74,12 +73,12 @@ func runBenchmark(b *testing.B, producers int, consumers int, parallelism int, w
 	}
 	runtime.GC()
 	// Set benchmark parameters
-	runtime.GOMAXPROCS(parallelism)
 	n := (approxBatchSize) / producers * producers
 	// Do producer-consumer work in goroutines
 	b.Run(fmt.Sprintf("withSelect=%t/work=%d/goroutines=%d/threads=%d",
 		withSelect, work, producers + consumers, parallelism),
 		func(b *testing.B) {
+			runtime.GOMAXPROCS(parallelism)
 			b.N = n
 			if kovalAlgo {
 				runBenchmarkKoval(n, producers, consumers, withSelect, work)
