@@ -11,62 +11,49 @@ import (
 	"runtime/pprof"
 )
 
-const useProfiler = true
+const useProfiler = false
+const kovalAlgo = true
+const approxBatchSize = 100000
+var parallelism = []int{1, 2, 4, 6, 8, 12, 16, 18, 24, 32, 36, 48, 64, 72, 96, 108, 128, 144}
+var goroutines = []int{0, 1000, 10000}
+var work = []int{10, 100, 200}
 
-func setupProfiler(channels int, threads int) {
-	if useProfiler {
-		runtime.SetCPUProfileRate(1000)
-		runtime.GOMAXPROCS(1)
-		f, err := os.Create(fmt.Sprintf("cur_ch%dt%d.pprof", channels, threads))
-		if err != nil {
-			log.Fatal(err)
+func BenchmarkN1(b *testing.B) {
+	for _, withSelect := range [2]bool{false, true} {
+		for _, work := range work {
+			for _, parallelism := range parallelism {
+				consumers := 1
+				producers := parallelism - 1
+				if producers == 0 { producers = 1 }
+				// Warm-up at first
+				for times := 0; times < 2; times++ {
+					runBenchmark(b, producers, consumers, parallelism, withSelect, work)
+				}
+				// Then run benchmarks
+				for times := 0; times < 10; times++ {
+					runBenchmark(b, producers, consumers, parallelism, withSelect, work)
+				}
+			}
 		}
-		pprof.StartCPUProfile(f)
 	}
 }
 
-//func BenchmarkN1(b *testing.B) {
-//
-//}
 
-const kovalAlgo = true
 func BenchmarkNN(b *testing.B) {
-	for _, spin := range spins {
-		// Redirect output
-		outFile, _ := os.Create(fmt.Sprintf("spin%dsegm%d.out", spin, segmentSize))
-		os.Stdout = outFile
-		for _, withSelect := range [2]bool{false, true} {
-			for _, channels := range contentionFactor {
-				for _, goroutines := range goroutines {
-					for _, parallelism := range parallelism {
-						producers := goroutines / (channels * 2)
-						if producers == 0 {
-							producers = (parallelism + 1) / 2 // round up
-						}
-						consumers := producers // N:N case
-						//var algo string
-						//if kovalAlgo {
-						//	algo = fmt.Sprintf("k_spin%d_segm%d",spin, segmentSize)
-						//} else {
-						//	algo = "golang"
-						//}
-						// Warm-up at first
-						for times := 0; times < 2; times++ {
-							runBenchmark(b, producers, consumers, channels, parallelism, withSelect, kovalAlgo, spin)
-						}
-						// Then run benchmarks
-						for times := 0; times < 10; times++ {
-							runtime.GC()
-							setupProfiler(channels, parallelism)
-							b.Run(fmt.Sprintf("withSelect=%t/channels=%d/goroutines=%d/parallelism=%d",
-								withSelect, channels, goroutines, parallelism),
-								func(b *testing.B) {
-									runBenchmark(b, producers, consumers, channels, parallelism, withSelect, kovalAlgo, spin)
-								})
-							if useProfiler {
-								pprof.StopCPUProfile()
-							}
-						}
+	for _, withSelect := range [2]bool{false, true} {
+		for _, work := range work {
+			for _, goroutines := range goroutines {
+				for _, parallelism := range parallelism {
+					var producers, consumers int
+					if goroutines == 0 {
+						producers = (parallelism + 1) / 2
+					} else {
+						producers = goroutines / 2
+					}
+					consumers = producers
+					// Then run benchmarks
+					for times := 0; times < 10; times++ {
+						runBenchmark(b, producers, consumers, parallelism, withSelect, work)
 					}
 				}
 			}
@@ -74,34 +61,38 @@ func BenchmarkNN(b *testing.B) {
 	}
 }
 
-func runBenchmark(b *testing.B, producers int, consumers int, channels int, parallelism int, withSelect bool, kovalAlgo bool, spin int) {
-	b.StopTimer()
+func runBenchmark(b *testing.B, producers int, consumers int, parallelism int, withSelect bool, work int) {
+	if useProfiler {
+		runtime.SetCPUProfileRate(1000)
+		runtime.GOMAXPROCS(1)
+		f, err := os.Create(fmt.Sprintf("cur_S%tT%dW%d.pprof", withSelect, parallelism, work))
+		if err != nil {
+			log.Fatal(err)
+		}
+		pprof.StartCPUProfile(f)
+		defer pprof.StopCPUProfile()
+	}
+	runtime.GC()
 	// Set benchmark parameters
 	runtime.GOMAXPROCS(parallelism)
-	n := lcf(producers, consumers)
-	if n < minBatchSize {
-		n = minBatchSize / n * n
-	}
-	if n % producers != 0 || n % consumers != 0 {
-		b.Fatal("n should be a common factor of producers and consumers")
-	}
-	b.N = n * channels
-	wg := &sync.WaitGroup{}
-	wg.Add((producers + consumers) * channels)
-	b.StartTimer()
+	n := (approxBatchSize) / producers * producers
 	// Do producer-consumer work in goroutines
-	for channel := 0; channel < channels; channel++ {
-		if kovalAlgo {
-			runWithOneChannelKoval(b, wg, producers, consumers, n, withSelect, spin)
-		} else {
-			runWithOneChannelGo(b, wg, producers, consumers, n, withSelect)
-		}
-	}
+	b.Run(fmt.Sprintf("withSelect=%t/work=%d/goroutines=%d/threads=%d",
+		withSelect, work, producers + consumers, parallelism),
+		func(b *testing.B) {
+			b.N = n
+			if kovalAlgo {
+				runBenchmarkKoval(n, producers, consumers, withSelect, work)
+			} else {
+				runBenchmarkGo(n, producers, consumers, withSelect, work)
+			}
+		})
 	// Wait until all goroutines are executed
-	wg.Wait()
 }
 
-func runWithOneChannelGo(b *testing.B, wg *sync.WaitGroup, producers int, consumers int, n int, withSelect bool) {
+func runBenchmarkGo(n int, producers int, consumers int, withSelect bool, work int) {
+	wg := sync.WaitGroup{}
+	wg.Add(producers + consumers)
 	c := make(chan int)
 	// Run producers
 	for i := 0; i < producers; i++ {
@@ -118,7 +109,7 @@ func runWithOneChannelGo(b *testing.B, wg *sync.WaitGroup, producers int, consum
 				} else {
 					c <- j
 				}
-				ConsumeCPU(7)
+				ConsumeCPU(work)
 			}
 		}()
 	}
@@ -137,20 +128,23 @@ func runWithOneChannelGo(b *testing.B, wg *sync.WaitGroup, producers int, consum
 				} else {
 					<- c
 				}
-				ConsumeCPU(7)
+				ConsumeCPU(work)
 			}
 		}()
 	}
+	wg.Wait()
 }
 
-func runWithOneChannelKoval(b *testing.B, wg *sync.WaitGroup, producers int, consumers int, n int, withSelect bool, spin int) {
-	c := NewLFChan(spin)
+func runBenchmarkKoval(n int, producers int, consumers int, withSelect bool, work int) {
+	wg := sync.WaitGroup{}
+	wg.Add(producers + consumers)
+	c := NewLFChan()
 	// Run producers
 	for i := 0; i < producers; i++ {
 		go func() {
 			defer wg.Done()
 			var dummyChan *LFChan
-			if withSelect { dummyChan = NewLFChan(spin) }
+			if withSelect { dummyChan = NewLFChan() }
 			for j := 0; j < n / producers; j++ {
 				if withSelect {
 					Select(
@@ -168,17 +162,16 @@ func runWithOneChannelKoval(b *testing.B, wg *sync.WaitGroup, producers int, con
 				} else {
 					c.SendInt(j)
 				}
-				ConsumeCPU(7)
+				ConsumeCPU(work)
 			}
 		}()
 	}
 	// Run consumers
 	for i := 0; i < consumers; i++ {
-
 		go func() {
 			defer wg.Done()
 			var dummyChan *LFChan
-			if withSelect { dummyChan = NewLFChan(spin) }
+			if withSelect { dummyChan = NewLFChan() }
 			for j := 0; j < n / consumers; j++ {
 				if withSelect {
 					Select(
@@ -196,44 +189,9 @@ func runWithOneChannelKoval(b *testing.B, wg *sync.WaitGroup, producers int, con
 				} else {
 					c.Receive()
 				}
-				ConsumeCPU(7)
+				ConsumeCPU(work)
 			}
 		}()
 	}
+	wg.Wait()
 }
-
-func gcd(a, b int) int {
-	for a != b {
-		if a > b {
-			a -= b
-		} else {
-			b -= a
-		}
-	}
-	return a
-}
-
-func lcf(a, b int) int {
-	return a * b / gcd(a, b)
-}
-
-func goroutinesFactor() int {
-	res := 1
-	for _,e := range parallelism {
-		res = lcf(res, e)
-	}
-	res *= 2
-	return res
-}
-
-const minBatchSize = 100000
-//var parallelism = []int{1, 2, 4, 6, 8, 12, 16, 18, 24, 32, 36, 48, 64, 72, 96, 108, 128, 144}
-var parallelism = []int{1, 2, 4, 8, 16, 24, 32, 64, 96, 128, 144}
-var contentionFactor = []int{1, 10}
-//var contentionFactor = []int{1, 2, 4, 8, 16, 32}
-var goroutines = []int{0}
-//var goroutines = []int{0, goroutinesFactor()}
-//var goroutines = []int{0, goroutinesFactor(), goroutinesFactor() * 10, goroutinesFactor() * 100}
-
-var spins = []int{300}
-//var spins = []int{0, 50, 100, 200, 300, 500, 700, 1000, 1300, 1600, 2000, 2500, 3000, 4000, 6000, 10000, 2147483647}

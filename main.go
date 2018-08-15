@@ -9,7 +9,7 @@ import (
 func main() {
 	n := 10000000
 	runtime.GOMAXPROCS(2)
-	c := NewLFChan(300)
+	c := NewLFChan()
 	wg := sync.WaitGroup{}
 	wg.Add(2)
 	go func() {

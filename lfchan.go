@@ -9,8 +9,6 @@ import (
 )
 
 type LFChan struct {
-	spinThreshold int
-
 	_deqIdx int64
 	_enqIdx int64
 
@@ -20,10 +18,9 @@ type LFChan struct {
 	fcq *FCQueue
 }
 
-func NewLFChan(spinThreshold int) *LFChan {
+func NewLFChan( ) *LFChan {
 	emptyNode := (unsafe.Pointer) (newNode(0, nil))
 	c := &LFChan{
-		spinThreshold: spinThreshold,
 		_deqIdx: 1,
 		_enqIdx: 1,
 		_head: emptyNode,
@@ -91,6 +88,7 @@ var ParkResult = (unsafe.Pointer) ((uintptr) (4097))
 const segmentSizeShift = 5
 const segmentSize = 1 << segmentSizeShift
 const segmentIndexMask = segmentSize - 1
+const spinThreshold = 300
 
 var selectIdGen int64 = 0
 
@@ -155,7 +153,7 @@ func (c* LFChan) sendOrReceiveFC(element unsafe.Pointer, cont unsafe.Pointer) un
 			}
 			// Read the first element
 			deqIndexInHead := indexInNode(deqIdx)
-			firstElement := c.readElement(head, deqIndexInHead)
+			firstElement := head.readElement(deqIndexInHead)
 			// Check that the element is not taken already.
 			if firstElement == takenElement {
 				c.casDeqIdx(deqIdx, deqIdx + 1)
@@ -242,7 +240,7 @@ func (c* LFChan) sendOrReceive(element unsafe.Pointer) unsafe.Pointer {
 			}
 			// Read the first element
 			deqIndexInHead := indexInNode(deqIdx)
-			firstElement := c.readElement(head, deqIndexInHead)
+			firstElement := head.readElement(deqIndexInHead)
 			// Check that the element is not taken already.
 			if firstElement == takenElement {
 				c.casDeqIdx(deqIdx, deqIdx + 1)
@@ -295,17 +293,17 @@ func (c* LFChan) sendOrReceive(element unsafe.Pointer) unsafe.Pointer {
 // at the specified index. Returns this element or
 // marks the slot as broken (sets `TAKEN_ELEMENT` to the slot)
 // and returns `TAKEN_ELEMENT` if the element is unavailable.
-func (c *LFChan) readElement(node *node, index int32) unsafe.Pointer {
+func (n *node) readElement(index int32) unsafe.Pointer {
 	// Element index in `Node#_data` array
 	// Spin wait on the slot
-	elementAddr := &node._data[index * 2]
+	elementAddr := &n._data[index * 2]
 	var attempt = 0
 	for {
 		element := atomic.LoadPointer(elementAddr) // volatile read
 		if element != nil {
 			return element
 		}
-		if attempt >= c.spinThreshold {
+		if attempt >= spinThreshold {
 			break
 		}
 		attempt++
@@ -315,7 +313,7 @@ func (c *LFChan) readElement(node *node, index int32) unsafe.Pointer {
 		return takenElement
 	} else {
 		// The element is set, read it and return
-		return node._data[index * 2]
+		return n._data[index * 2]
 	}
 }
 
@@ -547,7 +545,7 @@ func (c *LFChan) regSelect(selectInstance *SelectInstance, element unsafe.Pointe
 			}
 			// Read the first element
 			deqIdxInNode := indexInNode(deqIdx)
-			firstElement := c.readElement(head, deqIdxInNode)
+			firstElement := head.readElement(deqIdxInNode)
 			// Check that the element is not taken already.
 			if firstElement == takenElement {
 				c.casDeqIdx(deqIdx, deqIdx + 1)

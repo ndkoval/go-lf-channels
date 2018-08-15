@@ -8,7 +8,7 @@ import (
 
 func TestSimple(t *testing.T) {
 	// Run sender
-	c := NewLFChan(10)
+	c := NewLFChan()
 	go func() {
 		c.SendInt(10)
 	}()
@@ -18,8 +18,8 @@ func TestSimple(t *testing.T) {
 }
 
 func TestSimpleSendAndReceiveWithSelect(t *testing.T) {
-	c1 := NewLFChan(10)
-	c2 := NewLFChan(10)
+	c1 := NewLFChan()
+	c2 := NewLFChan()
 	N := 1000
 	// Run sender
 	go func() {
@@ -50,8 +50,8 @@ func TestSimpleSendAndReceiveWithSelect(t *testing.T) {
 }
 
 func TestSimpleSelects(t *testing.T) {
-	c1 := NewLFChan(10)
-	c2 := NewLFChan(10)
+	c1 := NewLFChan()
+	c2 := NewLFChan()
 	N := 1000
 	// Run sender
 	go func() {
@@ -95,7 +95,7 @@ func TestSimpleSelects(t *testing.T) {
 func TestStress(t *testing.T) {
 	n := 500000
 	k := 10
-	c := NewLFChan(300)
+	c := NewLFChan()
 	wg := sync.WaitGroup{}
 	// Run sender
 	for xxx := 0; xxx < k; xxx++ {
@@ -126,8 +126,8 @@ func TestStress(t *testing.T) {
 func TestStressWithSelectOnReceive(t *testing.T) {
 	n := 500000
 	k := 2
-	c := NewLFChan(300)
-	dummy := NewLFChan(300)
+	c := NewLFChan()
+	dummy := NewLFChan()
 	wg := sync.WaitGroup{}
 	// Run sender
 	for sender := 0; sender < k; sender++ {
@@ -175,8 +175,8 @@ func TestStressWithSelectOnReceive(t *testing.T) {
 func TestStressSelects(t *testing.T) {
 	n := 500000
 	k := 3
-	c := NewLFChan(300)
-	dummy := NewLFChan(300)
+	c := NewLFChan()
+	dummy := NewLFChan()
 	wg := sync.WaitGroup{}
 	// Run sender
 	for sender := 0; sender < k; sender++ {
@@ -227,8 +227,8 @@ func TestStressSelects(t *testing.T) {
 func TestStressBothSendAndReceiveSelect(t *testing.T) {
 	n := 50000
 	k := 10
-	c1 := NewLFChan(300)
-	c2 := NewLFChan(300)
+	c1 := NewLFChan()
+	c2 := NewLFChan()
 	wg := sync.WaitGroup{}
 	// Run sender
 	//for sender := 0; sender < k; sender++ {
@@ -276,8 +276,8 @@ func TestStressBothSendAndReceiveSelect(t *testing.T) {
 }
 
 func TestCancellation(t *testing.T) {
-	c := NewLFChan(300)
-	dummy := NewLFChan(300)
+	c := NewLFChan()
+	dummy := NewLFChan()
 	n := 100000
 	k := 50
 	// Add first element to the dummy channel
