@@ -98,7 +98,7 @@ func (c *LFChan) Receive() unsafe.Pointer {
 	return c.sendOrReceive(ReceiverElement)
 }
 
-const maxBackoffMask = 0x11111111111
+const maxBackoffMask = 0x1111111111
 var consumedCPU = int32(time.Now().Unix())
 
 func ConsumeCPU(tokens int) {
@@ -111,10 +111,19 @@ func ConsumeCPU(tokens int) {
 
 
 func (c* LFChan) sendOrReceiveFC(element unsafe.Pointer, cont unsafe.Pointer) unsafe.Pointer {
+	r := int32(uintptr(element))
+	maxBackoff := 1
 	try_again: for { // CAS-loop
 		enqIdx := c.enqIdx()
 		deqIdx := c.deqIdx()
 		if enqIdx < deqIdx {
+			r ^= r << 13
+			r ^= r >> 17
+			r ^= r << 5
+			backoff := int(r) & maxBackoff
+			ConsumeCPU(int(backoff))
+			maxBackoff = maxBackoff + (maxBackoff * 1)
+			maxBackoff &= maxBackoffMask
 			continue try_again
 		}
 		// Check if queue is empty
@@ -122,6 +131,13 @@ func (c* LFChan) sendOrReceiveFC(element unsafe.Pointer, cont unsafe.Pointer) un
 			if c.addToWaitingQueue2(enqIdx, element, cont) {
 				return ParkResult
 			} else {
+				r ^= r << 13
+				r ^= r >> 17
+				r ^= r << 5
+				backoff := int(r) & maxBackoff
+				ConsumeCPU(int(backoff))
+				maxBackoff = maxBackoff + (maxBackoff * 1)
+				maxBackoff &= maxBackoffMask
 				continue try_again
 			}
 		} else {
@@ -138,6 +154,13 @@ func (c* LFChan) sendOrReceiveFC(element unsafe.Pointer, cont unsafe.Pointer) un
 					c.casHead(head, headNext)
 				} else {
 					c.casDeqIdx(deqIdx, headId << segmentSizeShift)
+					r ^= r << 13
+					r ^= r >> 17
+					r ^= r << 5
+					backoff := int(r) & maxBackoff
+					ConsumeCPU(int(backoff))
+					maxBackoff = maxBackoff + (maxBackoff * 1)
+					maxBackoff &= maxBackoffMask
 				}
 				continue try_again
 			}
@@ -147,6 +170,13 @@ func (c* LFChan) sendOrReceiveFC(element unsafe.Pointer, cont unsafe.Pointer) un
 			// Check that the element is not taken already.
 			if firstElement == takenElement {
 				c.casDeqIdx(deqIdx, deqIdx + 1)
+				r ^= r << 13
+				r ^= r >> 17
+				r ^= r << 5
+				backoff := int(r) & maxBackoff
+				ConsumeCPU(int(backoff))
+				maxBackoff = maxBackoff + (maxBackoff * 1)
+				maxBackoff &= maxBackoffMask
 				continue try_again
 			}
 			// Decide should we make a rendezvous or not
@@ -155,22 +185,47 @@ func (c* LFChan) sendOrReceiveFC(element unsafe.Pointer, cont unsafe.Pointer) un
 				if c.tryResumeContinuation(head, deqIndexInHead, deqIdx, element) {
 					return firstElement
 				} else {
+					r ^= r << 13
+					r ^= r >> 17
+					r ^= r << 5
+					backoff := int(r) & maxBackoff
+					ConsumeCPU(int(backoff))
+					maxBackoff = maxBackoff + (maxBackoff * 1)
+					maxBackoff &= maxBackoffMask
 					continue try_again
 				}
 			} else {
 				if c.addToWaitingQueue2(enqIdx, element, cont) {
 					return ParkResult
-				} else { continue try_again }
+				} else {
+					r ^= r << 13
+					r ^= r >> 17
+					r ^= r << 5
+					backoff := int(r) & maxBackoff
+					ConsumeCPU(int(backoff))
+					maxBackoff = maxBackoff + (maxBackoff * 1)
+					maxBackoff &= maxBackoffMask
+					continue try_again
+				}
 			}
 		}
 	}
 }
 
 func (c* LFChan) sendOrReceive(element unsafe.Pointer) unsafe.Pointer {
+	r := int32(uintptr(element))
+	maxBackoff := 1
 	try_again: for { // CAS-loop
  		enqIdx := c.enqIdx()
 		deqIdx := c.deqIdx()
 		if enqIdx < deqIdx {
+			r ^= r << 13
+			r ^= r >> 17
+			r ^= r << 5
+			backoff := int(r) & maxBackoff
+			ConsumeCPU(int(backoff))
+			maxBackoff = maxBackoff + (maxBackoff * 1)
+			maxBackoff &= maxBackoffMask
 			continue try_again
 		}
 		// Check if queue is empty
@@ -178,6 +233,13 @@ func (c* LFChan) sendOrReceive(element unsafe.Pointer) unsafe.Pointer {
 			if c.addToWaitingQueue2(enqIdx, element, nil) {
 				return parkAndThenReturn()
 			} else {
+				r ^= r << 13
+				r ^= r >> 17
+				r ^= r << 5
+				backoff := int(r) & maxBackoff
+				ConsumeCPU(int(backoff))
+				maxBackoff = maxBackoff + (maxBackoff * 1)
+				maxBackoff &= maxBackoffMask
 				continue try_again
 			}
 		} else {
@@ -194,6 +256,13 @@ func (c* LFChan) sendOrReceive(element unsafe.Pointer) unsafe.Pointer {
 					c.casHead(head, headNext)
 				} else {
 					c.casDeqIdx(deqIdx, headId << segmentSizeShift)
+					r ^= r << 13
+					r ^= r >> 17
+					r ^= r << 5
+					backoff := int(r) & maxBackoff
+					ConsumeCPU(int(backoff))
+					maxBackoff = maxBackoff + (maxBackoff * 1)
+					maxBackoff &= maxBackoffMask
 				}
 				continue try_again
 			}
@@ -203,6 +272,13 @@ func (c* LFChan) sendOrReceive(element unsafe.Pointer) unsafe.Pointer {
 			// Check that the element is not taken already.
 			if firstElement == takenElement {
 				c.casDeqIdx(deqIdx, deqIdx + 1)
+				r ^= r << 13
+				r ^= r >> 17
+				r ^= r << 5
+				backoff := int(r) & maxBackoff
+				ConsumeCPU(int(backoff))
+				maxBackoff = maxBackoff + (maxBackoff * 1)
+				maxBackoff &= maxBackoffMask
 				continue try_again
 			}
 			// Decide should we make a rendezvous or not
@@ -211,12 +287,28 @@ func (c* LFChan) sendOrReceive(element unsafe.Pointer) unsafe.Pointer {
 				if c.tryResumeContinuation(head, deqIndexInHead, deqIdx, element) {
 					return firstElement
 				} else {
+					r ^= r << 13
+					r ^= r >> 17
+					r ^= r << 5
+					backoff := int(r) & maxBackoff
+					ConsumeCPU(int(backoff))
+					maxBackoff = maxBackoff + (maxBackoff * 1)
+					maxBackoff &= maxBackoffMask
 					continue try_again
 				}
 			} else {
 				if c.addToWaitingQueue2(enqIdx, element, nil) {
 					return parkAndThenReturn()
-				} else { continue try_again }
+				} else {
+					r ^= r << 13
+					r ^= r >> 17
+					r ^= r << 5
+					backoff := int(r) & maxBackoff
+					ConsumeCPU(int(backoff))
+					maxBackoff = maxBackoff + (maxBackoff * 1)
+					maxBackoff &= maxBackoffMask
+					continue try_again
+				}
 			}
 		}
 	}
@@ -439,18 +531,37 @@ func (n *node) readContinuation(index int32) (cont unsafe.Pointer, isSelectInsta
 // === SELECT ===
 
 func (c *LFChan) regSelect(selectInstance *SelectInstance, element unsafe.Pointer) (bool, RegInfo) {
+	r := int32(uintptr(element))
+	maxBackoff := 1
 	try_again: for { // CAS-loop
-		//println(selectInstance)
 		if selectInstance.isSelected() { return false, RegInfo{} }
 		enqIdx := c.enqIdx()
 		deqIdx := c.deqIdx()
-		if enqIdx < deqIdx { continue try_again }
+		if enqIdx < deqIdx {
+			r ^= r << 13
+			r ^= r >> 17
+			r ^= r << 5
+			backoff := int(r) & maxBackoff
+			ConsumeCPU(int(backoff))
+			maxBackoff = maxBackoff + (maxBackoff * 1)
+			maxBackoff &= maxBackoffMask
+			continue try_again
+		}
 		// Check if queue is empty
 		if deqIdx == enqIdx {
 			addSuccess, regInfo := c.addToWaitingQueue(enqIdx, element, unsafe.Pointer(selectInstance))
 			if addSuccess {
 				return true, regInfo
-			} else { continue try_again }
+			} else {
+				r ^= r << 13
+				r ^= r >> 17
+				r ^= r << 5
+				backoff := int(r) & maxBackoff
+				ConsumeCPU(int(backoff))
+				maxBackoff = maxBackoff + (maxBackoff * 1)
+				maxBackoff &= maxBackoffMask
+				continue try_again
+			}
 		} else {
 			// Queue is not empty
 			head := c.getHead()
@@ -465,6 +576,13 @@ func (c *LFChan) regSelect(selectInstance *SelectInstance, element unsafe.Pointe
 					c.casHead(head, headNext)
 				} else {
 					c.casDeqIdx(deqIdx, headId << segmentSizeShift)
+					r ^= r << 13
+					r ^= r >> 17
+					r ^= r << 5
+					backoff := int(r) & maxBackoff
+					ConsumeCPU(int(backoff))
+					maxBackoff = maxBackoff + (maxBackoff * 1)
+					maxBackoff &= maxBackoffMask
 				}
 				continue try_again
 			}
@@ -474,6 +592,13 @@ func (c *LFChan) regSelect(selectInstance *SelectInstance, element unsafe.Pointe
 			// Check that the element is not taken already.
 			if firstElement == takenElement {
 				c.casDeqIdx(deqIdx, deqIdx + 1)
+				r ^= r << 13
+				r ^= r >> 17
+				r ^= r << 5
+				backoff := int(r) & maxBackoff
+				ConsumeCPU(int(backoff))
+				maxBackoff = maxBackoff + (maxBackoff * 1)
+				maxBackoff &= maxBackoffMask
 				continue try_again
 			}
 			// Decide should we make a rendezvous or not
@@ -481,12 +606,30 @@ func (c *LFChan) regSelect(selectInstance *SelectInstance, element unsafe.Pointe
 			if makeRendezvous {
 				if c.tryResumeContinuationForSelect(head, deqIndexInHead, deqIdx, element, selectInstance, firstElement) {
 					return false, RegInfo{}
-				} else { continue try_again }
+				} else {
+					r ^= r << 13
+					r ^= r >> 17
+					r ^= r << 5
+					backoff := int(r) & maxBackoff
+					ConsumeCPU(int(backoff))
+					maxBackoff = maxBackoff + (maxBackoff * 1)
+					maxBackoff &= maxBackoffMask
+					continue try_again
+				}
 			} else {
 				addSuccess, regInfo := c.addToWaitingQueue(enqIdx, element, unsafe.Pointer(selectInstance))
 				if addSuccess {
 					return true, regInfo
-				} else { continue try_again }
+				} else {
+					r ^= r << 13
+					r ^= r >> 17
+					r ^= r << 5
+					backoff := int(r) & maxBackoff
+					ConsumeCPU(int(backoff))
+					maxBackoff = maxBackoff + (maxBackoff * 1)
+					maxBackoff &= maxBackoffMask
+					continue try_again
+				}
 			}
 		}
 	}
