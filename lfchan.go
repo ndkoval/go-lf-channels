@@ -166,7 +166,7 @@ func (c* LFChan) sendOrReceiveFC(element unsafe.Pointer, cont unsafe.Pointer) un
 			}
 			// Read the first element
 			deqIndexInHead := indexInNode(deqIdx)
-			firstElement := head.readElement(deqIndexInHead, maxBackoff)
+			firstElement := head.readElement(deqIndexInHead)
 			// Check that the element is not taken already.
 			if firstElement == takenElement {
 				c.casDeqIdx(deqIdx, deqIdx + 1)
@@ -268,7 +268,7 @@ func (c* LFChan) sendOrReceive(element unsafe.Pointer) unsafe.Pointer {
 			}
 			// Read the first element
 			deqIndexInHead := indexInNode(deqIdx)
-			firstElement := head.readElement(deqIndexInHead, maxBackoff)
+			firstElement := head.readElement(deqIndexInHead)
 			// Check that the element is not taken already.
 			if firstElement == takenElement {
 				c.casDeqIdx(deqIdx, deqIdx + 1)
@@ -318,12 +318,12 @@ func (c* LFChan) sendOrReceive(element unsafe.Pointer) unsafe.Pointer {
 // at the specified index. Returns this element or
 // marks the slot as broken (sets `TAKEN_ELEMENT` to the slot)
 // and returns `TAKEN_ELEMENT` if the element is unavailable.
-func (n *node) readElement(index int32, backoff int) unsafe.Pointer {
+func (n *node) readElement(index int32) unsafe.Pointer {
 	// Element index in `Node#_data` array
 	// Spin wait on the slot
 	elementAddr := &n._data[index * 2]
 	element := atomic.LoadPointer(elementAddr) // volatile read
-	for attempt := 0; attempt < backoff; attempt++ {
+	for attempt := 0; attempt < spinThreshold; attempt++ {
 		if element != nil {
 			return element
 		}
@@ -591,7 +591,7 @@ func (c *LFChan) regSelectFC(selectInstance *SelectInstance, element unsafe.Poin
 			}
 			// Read the first element
 			deqIndexInHead := indexInNode(deqIdx)
-			firstElement := head.readElement(deqIndexInHead, maxBackoff)
+			firstElement := head.readElement(deqIndexInHead)
 			// Check that the element is not taken already.
 			if firstElement == takenElement {
 				c.casDeqIdx(deqIdx, deqIdx + 1)
@@ -696,7 +696,7 @@ func (c *LFChan) regSelect(selectInstance *SelectInstance, element unsafe.Pointe
 			}
 			// Read the first element
 			deqIndexInHead := indexInNode(deqIdx)
-			firstElement := head.readElement(deqIndexInHead, maxBackoff)
+			firstElement := head.readElement(deqIndexInHead)
 			// Check that the element is not taken already.
 			if firstElement == takenElement {
 				c.casDeqIdx(deqIdx, deqIdx + 1)
