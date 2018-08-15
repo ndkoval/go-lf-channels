@@ -14,8 +14,6 @@ type LFChan struct {
 
 	_head unsafe.Pointer
 	_tail unsafe.Pointer
-
-	fcq *FCQueue
 }
 
 func NewLFChan( ) *LFChan {
@@ -26,7 +24,6 @@ func NewLFChan( ) *LFChan {
 		_head: emptyNode,
 		_tail: emptyNode,
 	}
-	c.fcq = NewFCQueue(c)
 	return c
 }
 
@@ -114,14 +111,10 @@ func ConsumeCPU(tokens int) {
 
 
 func (c* LFChan) sendOrReceiveFC(element unsafe.Pointer, cont unsafe.Pointer) unsafe.Pointer {
-	backoff := 1
 	try_again: for { // CAS-loop
 		enqIdx := c.enqIdx()
 		deqIdx := c.deqIdx()
 		if enqIdx < deqIdx {
-			backoff *= 2
-			backoff &= maxBackoffMask
-			ConsumeCPU(backoff)
 			continue try_again
 		}
 		// Check if queue is empty
@@ -129,9 +122,6 @@ func (c* LFChan) sendOrReceiveFC(element unsafe.Pointer, cont unsafe.Pointer) un
 			if c.addToWaitingQueue2(enqIdx, element, cont) {
 				return ParkResult
 			} else {
-				backoff *= 2
-				backoff &= maxBackoffMask
-				ConsumeCPU(backoff)
 				continue try_again
 			}
 		} else {
@@ -157,9 +147,6 @@ func (c* LFChan) sendOrReceiveFC(element unsafe.Pointer, cont unsafe.Pointer) un
 			// Check that the element is not taken already.
 			if firstElement == takenElement {
 				c.casDeqIdx(deqIdx, deqIdx + 1)
-				backoff *= 2
-				backoff &= maxBackoffMask
-				ConsumeCPU(backoff)
 				continue try_again
 			}
 			// Decide should we make a rendezvous or not
@@ -168,44 +155,22 @@ func (c* LFChan) sendOrReceiveFC(element unsafe.Pointer, cont unsafe.Pointer) un
 				if c.tryResumeContinuation(head, deqIndexInHead, deqIdx, element) {
 					return firstElement
 				} else {
-					backoff *= 2
-					backoff &= maxBackoffMask
-					ConsumeCPU(backoff)
 					continue try_again
 				}
 			} else {
-				deqIdxLimit := enqIdx
-				for {
-					if c.addToWaitingQueue2(enqIdx, element, cont) {
-						return ParkResult
-					}
-					enqIdx = c.enqIdx()
-					deqIdx = c.deqIdx()
-					if deqIdx >= deqIdxLimit {
-						backoff *= 2
-						backoff &= maxBackoffMask
-						ConsumeCPU(backoff)
-						continue try_again
-					}
-				}
+				if c.addToWaitingQueue2(enqIdx, element, cont) {
+					return ParkResult
+				} else { continue try_again }
 			}
 		}
 	}
 }
 
-const FC_START = 3
-
 func (c* LFChan) sendOrReceive(element unsafe.Pointer) unsafe.Pointer {
-	fc := 0
-	backoff := 1
 	try_again: for { // CAS-loop
  		enqIdx := c.enqIdx()
 		deqIdx := c.deqIdx()
 		if enqIdx < deqIdx {
-			fc++
-			if fc > FC_START {
-				return c.fcq.addTaskAndCombine(element, runtime.GetGoroutine())
-			}
 			continue try_again
 		}
 		// Check if queue is empty
@@ -213,12 +178,6 @@ func (c* LFChan) sendOrReceive(element unsafe.Pointer) unsafe.Pointer {
 			if c.addToWaitingQueue2(enqIdx, element, nil) {
 				return parkAndThenReturn()
 			} else {
-				fc++
-				backoff *= 4
-				ConsumeCPU(backoff)
-				if fc > FC_START {
-					return c.fcq.addTaskAndCombine(element, runtime.GetGoroutine())
-				}
 				continue try_again
 			}
 		} else {
@@ -244,12 +203,6 @@ func (c* LFChan) sendOrReceive(element unsafe.Pointer) unsafe.Pointer {
 			// Check that the element is not taken already.
 			if firstElement == takenElement {
 				c.casDeqIdx(deqIdx, deqIdx + 1)
-				fc++
-				backoff *= 4
-				ConsumeCPU(backoff)
-				if fc > FC_START {
-					return c.fcq.addTaskAndCombine(element, runtime.GetGoroutine())
-				}
 				continue try_again
 			}
 			// Decide should we make a rendezvous or not
@@ -258,32 +211,12 @@ func (c* LFChan) sendOrReceive(element unsafe.Pointer) unsafe.Pointer {
 				if c.tryResumeContinuation(head, deqIndexInHead, deqIdx, element) {
 					return firstElement
 				} else {
-					fc++
-					backoff *= 4
-					ConsumeCPU(backoff)
-					if fc > FC_START {
-						return c.fcq.addTaskAndCombine(element, runtime.GetGoroutine())
-					}
 					continue try_again
 				}
 			} else {
-				deqIdxLimit := enqIdx
-				for {
-					if c.addToWaitingQueue2(enqIdx, element, nil) {
-						return parkAndThenReturn()
-					}
-					enqIdx = c.enqIdx()
-					deqIdx = c.deqIdx()
-					if deqIdx >= deqIdxLimit {
-						fc++
-						backoff *= 4
-						ConsumeCPU(backoff)
-						if fc > FC_START {
-							return c.fcq.addTaskAndCombine(element, runtime.GetGoroutine())
-						}
-						continue try_again
-					}
-				}
+				if c.addToWaitingQueue2(enqIdx, element, nil) {
+					return parkAndThenReturn()
+				} else { continue try_again }
 			}
 		}
 	}
@@ -297,16 +230,9 @@ func (n *node) readElement(index int32) unsafe.Pointer {
 	// Element index in `Node#_data` array
 	// Spin wait on the slot
 	elementAddr := &n._data[index * 2]
-	var attempt = 0
-	for {
-		element := atomic.LoadPointer(elementAddr) // volatile read
-		if element != nil {
-			return element
-		}
-		if attempt >= spinThreshold {
-			break
-		}
-		attempt++
+	element := atomic.LoadPointer(elementAddr) // volatile read
+	if element != nil {
+		return element
 	}
 	// Cannot spin forever, mark the slot as broken if it is still unavailable
 	if atomic.CompareAndSwapPointer(elementAddr, nil, takenElement) {
@@ -439,9 +365,11 @@ func (c *LFChan) tryResumeContinuation(head *node, indexInNode int32, deqIdx int
 func (c *LFChan) tryResumeContinuationForSelect(head *node, indexInNode int32, deqIdx int64, element unsafe.Pointer, selectInstance *SelectInstance, firstElement unsafe.Pointer) bool {
 	// Set descriptor at first
 	var desc *SelectDesc
+	var descCont unsafe.Pointer
+	var isDescContSelectInstance bool
 	for {
-		cont, _ := head.readContinuation(indexInNode)
-		if cont == takenContinuation {
+		descCont, isDescContSelectInstance = head.readContinuation(indexInNode)
+		if descCont == takenContinuation {
 			c.casDeqIdx(deqIdx, deqIdx + 1)
 			return false
 		}
@@ -449,9 +377,9 @@ func (c *LFChan) tryResumeContinuationForSelect(head *node, indexInNode int32, d
 			__type: SelectDescType,
 			channel: c,
 			selectInstance: selectInstance,
-			cont: cont,
+			cont: descCont,
 		}
-		if head.casContinuation(indexInNode, cont, unsafe.Pointer(desc)) { break }
+		if head.casContinuation(indexInNode, descCont, unsafe.Pointer(desc)) { break }
 	}
 	// Invoke selectDesc and update the continuation's cell
 	if desc.invoke() {
@@ -468,13 +396,11 @@ func (c *LFChan) tryResumeContinuationForSelect(head *node, indexInNode int32, d
 	// Move deque index forward
 	c.casDeqIdx(deqIdx, deqIdx + 1)
 	// Resume all continuations
-	anotherCont := desc.cont
 	var anotherG unsafe.Pointer
-	anotherContType := IntType(anotherCont)
-	if anotherContType == SelectInstanceType {
-		anotherG = ((*SelectInstance) (anotherCont)).gp
+	if isDescContSelectInstance {
+		anotherG = ((*SelectInstance) (descCont)).gp
 	} else {
-		anotherG = anotherCont
+		anotherG = descCont
 	}
 	runtime.SetGParam(anotherG, element)
 	runtime.UnparkUnsafe(anotherG)
@@ -529,23 +455,22 @@ func (c *LFChan) regSelect(selectInstance *SelectInstance, element unsafe.Pointe
 			// Queue is not empty
 			head := c.getHead()
 			headId := head.id
-			//println(selectInstance, "  ", deqIdx, "   ", enqIdx, "   H:", head, "  HN:", head.next())
+			// check consistency
 			deqIdxNodeId := nodeId(deqIdx)
-			// Check that deqIdx is not outdated
-			if headId > deqIdxNodeId {
-				continue try_again
-			}
-			// Check that head pointer should be moved forward
-			if headId < deqIdxNodeId {
-				headNext := head.next()
-				headNextNode := (*node) (headNext)
-				headNextNode._prev = nil
-				c.casHead(head, headNext)
+			if headId != deqIdxNodeId {
+				if headId < deqIdxNodeId {
+					headNext := head.next()
+					headNextNode := (*node) (headNext)
+					headNextNode._prev = nil
+					c.casHead(head, headNext)
+				} else {
+					c.casDeqIdx(deqIdx, headId << segmentSizeShift)
+				}
 				continue try_again
 			}
 			// Read the first element
-			deqIdxInNode := indexInNode(deqIdx)
-			firstElement := head.readElement(deqIdxInNode)
+			deqIndexInHead := indexInNode(deqIdx)
+			firstElement := head.readElement(deqIndexInHead)
 			// Check that the element is not taken already.
 			if firstElement == takenElement {
 				c.casDeqIdx(deqIdx, deqIdx + 1)
@@ -553,21 +478,15 @@ func (c *LFChan) regSelect(selectInstance *SelectInstance, element unsafe.Pointe
 			}
 			// Decide should we make a rendezvous or not
 			makeRendezvous := (element == ReceiverElement && firstElement != ReceiverElement) || (element != ReceiverElement && firstElement == ReceiverElement)
-			deqIdxLimit := enqIdx
 			if makeRendezvous {
-				if c.tryResumeContinuationForSelect(head, deqIdxInNode, deqIdx, element, selectInstance, firstElement) {
+				if c.tryResumeContinuationForSelect(head, deqIndexInHead, deqIdx, element, selectInstance, firstElement) {
 					return false, RegInfo{}
 				} else { continue try_again }
 			} else {
-				for {
-					addSuccess, regInfo := c.addToWaitingQueue(enqIdx, element, unsafe.Pointer(selectInstance))
-					if addSuccess {
-						return true, regInfo
-					} else { continue try_again }
-					enqIdx = c.enqIdx()
-					deqIdx = c.deqIdx()
-					if deqIdx >= deqIdxLimit { continue try_again }
-				}
+				addSuccess, regInfo := c.addToWaitingQueue(enqIdx, element, unsafe.Pointer(selectInstance))
+				if addSuccess {
+					return true, regInfo
+				} else { continue try_again }
 			}
 		}
 	}
@@ -607,7 +526,7 @@ func (sd *SelectDesc) invoke() bool {
 		}
 	}
 	// Phase 3 -- update descriptor's and selectInstance statuses
-	if (failed) {
+	if failed {
 		sd.setStatus(FAILED)
 		return false
 	} else {
