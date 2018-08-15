@@ -166,7 +166,7 @@ func (c* LFChan) sendOrReceiveFC(element unsafe.Pointer, cont unsafe.Pointer) un
 			}
 			// Read the first element
 			deqIndexInHead := indexInNode(deqIdx)
-			firstElement := head.readElement(deqIndexInHead)
+			firstElement := head.readElement(deqIndexInHead, maxBackoff)
 			// Check that the element is not taken already.
 			if firstElement == takenElement {
 				c.casDeqIdx(deqIdx, deqIdx + 1)
@@ -268,7 +268,7 @@ func (c* LFChan) sendOrReceive(element unsafe.Pointer) unsafe.Pointer {
 			}
 			// Read the first element
 			deqIndexInHead := indexInNode(deqIdx)
-			firstElement := head.readElement(deqIndexInHead)
+			firstElement := head.readElement(deqIndexInHead, maxBackoff)
 			// Check that the element is not taken already.
 			if firstElement == takenElement {
 				c.casDeqIdx(deqIdx, deqIdx + 1)
@@ -318,13 +318,16 @@ func (c* LFChan) sendOrReceive(element unsafe.Pointer) unsafe.Pointer {
 // at the specified index. Returns this element or
 // marks the slot as broken (sets `TAKEN_ELEMENT` to the slot)
 // and returns `TAKEN_ELEMENT` if the element is unavailable.
-func (n *node) readElement(index int32) unsafe.Pointer {
+func (n *node) readElement(index int32, backoff int) unsafe.Pointer {
 	// Element index in `Node#_data` array
 	// Spin wait on the slot
 	elementAddr := &n._data[index * 2]
 	element := atomic.LoadPointer(elementAddr) // volatile read
-	if element != nil {
-		return element
+	for attempt := 0; attempt < backoff; attempt++ {
+		if element != nil {
+			return element
+		}
+		element = atomic.LoadPointer(elementAddr) // volatile read
 	}
 	// Cannot spin forever, mark the slot as broken if it is still unavailable
 	if atomic.CompareAndSwapPointer(elementAddr, nil, takenElement) {
@@ -530,6 +533,111 @@ func (n *node) readContinuation(index int32) (cont unsafe.Pointer, isSelectInsta
 
 // === SELECT ===
 
+func (c *LFChan) regSelectFC(selectInstance *SelectInstance, element unsafe.Pointer) (bool, RegInfo) {
+	r := int32(uintptr(element))
+	maxBackoff := 1
+	try_again: for { // CAS-loop
+		if selectInstance.isSelected() { return false, RegInfo{} }
+		enqIdx := c.enqIdx()
+		deqIdx := c.deqIdx()
+		if enqIdx < deqIdx {
+			r ^= r << 13
+			r ^= r >> 17
+			r ^= r << 5
+			backoff := int(r) & maxBackoff
+			ConsumeCPU(int(backoff))
+			maxBackoff = maxBackoff + (maxBackoff * 1)
+			maxBackoff &= maxBackoffMask
+			continue try_again
+		}
+		// Check if queue is empty
+		if deqIdx == enqIdx {
+			addSuccess, regInfo := c.addToWaitingQueue(enqIdx, element, unsafe.Pointer(selectInstance))
+			if addSuccess {
+				return true, regInfo
+			} else {
+				r ^= r << 13
+				r ^= r >> 17
+				r ^= r << 5
+				backoff := int(r) & maxBackoff
+				ConsumeCPU(int(backoff))
+				maxBackoff = maxBackoff + (maxBackoff * 1)
+				maxBackoff &= maxBackoffMask
+				continue try_again
+			}
+		} else {
+			// Queue is not empty
+			head := c.getHead()
+			headId := head.id
+			// check consistency
+			deqIdxNodeId := nodeId(deqIdx)
+			if headId != deqIdxNodeId {
+				if headId < deqIdxNodeId {
+					headNext := head.next()
+					headNextNode := (*node) (headNext)
+					headNextNode._prev = nil
+					c.casHead(head, headNext)
+				} else {
+					c.casDeqIdx(deqIdx, headId << segmentSizeShift)
+					r ^= r << 13
+					r ^= r >> 17
+					r ^= r << 5
+					backoff := int(r) & maxBackoff
+					ConsumeCPU(int(backoff))
+					maxBackoff = maxBackoff + (maxBackoff * 1)
+					maxBackoff &= maxBackoffMask
+				}
+				continue try_again
+			}
+			// Read the first element
+			deqIndexInHead := indexInNode(deqIdx)
+			firstElement := head.readElement(deqIndexInHead, maxBackoff)
+			// Check that the element is not taken already.
+			if firstElement == takenElement {
+				c.casDeqIdx(deqIdx, deqIdx + 1)
+				r ^= r << 13
+				r ^= r >> 17
+				r ^= r << 5
+				backoff := int(r) & maxBackoff
+				ConsumeCPU(int(backoff))
+				maxBackoff = maxBackoff + (maxBackoff * 1)
+				maxBackoff &= maxBackoffMask
+				continue try_again
+			}
+			// Decide should we make a rendezvous or not
+			makeRendezvous := (element == ReceiverElement && firstElement != ReceiverElement) || (element != ReceiverElement && firstElement == ReceiverElement)
+			if makeRendezvous {
+				if c.tryResumeContinuationForSelect(head, deqIndexInHead, deqIdx, element, selectInstance, firstElement) {
+					return false, RegInfo{}
+				} else {
+					r ^= r << 13
+					r ^= r >> 17
+					r ^= r << 5
+					backoff := int(r) & maxBackoff
+					ConsumeCPU(int(backoff))
+					maxBackoff = maxBackoff + (maxBackoff * 1)
+					maxBackoff &= maxBackoffMask
+					continue try_again
+				}
+			} else {
+				addSuccess, regInfo := c.addToWaitingQueue(enqIdx, element, unsafe.Pointer(selectInstance))
+				if addSuccess {
+					return true, regInfo
+				} else {
+					r ^= r << 13
+					r ^= r >> 17
+					r ^= r << 5
+					backoff := int(r) & maxBackoff
+					ConsumeCPU(int(backoff))
+					maxBackoff = maxBackoff + (maxBackoff * 1)
+					maxBackoff &= maxBackoffMask
+					continue try_again
+				}
+			}
+		}
+	}
+}
+
 func (c *LFChan) regSelect(selectInstance *SelectInstance, element unsafe.Pointer) (bool, RegInfo) {
 	r := int32(uintptr(element))
 	maxBackoff := 1
@@ -588,7 +696,7 @@ func (c *LFChan) regSelect(selectInstance *SelectInstance, element unsafe.Pointe
 			}
 			// Read the first element
 			deqIndexInHead := indexInNode(deqIdx)
-			firstElement := head.readElement(deqIndexInHead)
+			firstElement := head.readElement(deqIndexInHead, maxBackoff)
 			// Check that the element is not taken already.
 			if firstElement == takenElement {
 				c.casDeqIdx(deqIdx, deqIdx + 1)

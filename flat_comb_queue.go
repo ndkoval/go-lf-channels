@@ -84,11 +84,10 @@ func (q *FCQueue) addTaskAndCombine(element unsafe.Pointer, cont unsafe.Pointer)
 			break
 		} else {
 			spin++
-			if spin > 100 {
+			if spin > 30 {
 				time.Sleep(1000)
 			}
 		}
-
 	}
 	res := node._data[idx * 2]
 	node._data[idx * 2] = nil
@@ -120,7 +119,13 @@ func (q *FCQueue) combine(limitNode *fcnode, limitIdx int32) {
 		element := atomic.SwapPointer(&head._data[idx * 2], takenElement)
 		if element == nil { continue }
 		cont := head._data[idx * 2 + 1]
-		res := q.c.sendOrReceiveFC(element, cont)
+		var res unsafe.Pointer
+		if IntType(cont) == SelectInstanceType {
+			q.c.regSelectFC((*SelectInstance) (cont), element)
+			res = nil
+		} else { // *g
+			res = q.c.sendOrReceiveFC(element, cont)
+		}
 		head._data[idx * 2] = res
 		atomic.StorePointer(&head._data[idx * 2 + 1], nil)
 		if limitNode == head && limitIdx == idx { return }

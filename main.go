@@ -28,11 +28,11 @@ func main() {
 }
 
 func IntToUnsafePointer(x int) unsafe.Pointer {
-	return (unsafe.Pointer)((uintptr)(x + 4098))
+	return (unsafe.Pointer)((uintptr)(x + 6000))
 }
 
 func UnsafePointerToInt(p unsafe.Pointer) int {
-	return (int) ((uintptr) (p)) - 4098
+	return (int) ((uintptr) (p)) - 6000
 }
 
 func (c *LFChan) SendInt(element int) {
