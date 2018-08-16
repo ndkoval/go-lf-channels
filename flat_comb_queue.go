@@ -85,7 +85,7 @@ func (q *FCQueue) addTaskAndCombine(element unsafe.Pointer, cont unsafe.Pointer)
 		} else {
 			spin++
 			if spin > 30 {
-				time.Sleep(1000)
+				time.Sleep(700)
 			}
 		}
 	}
