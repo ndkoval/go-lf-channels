@@ -85,7 +85,7 @@ var ParkResult = (unsafe.Pointer) ((uintptr) (4097))
 const segmentSizeShift = 5
 const segmentSize = 1 << segmentSizeShift
 const segmentIndexMask = segmentSize - 1
-const spinThreshold = 100
+const spinThreshold = 300
 
 var selectIdGen int64 = 0
 
