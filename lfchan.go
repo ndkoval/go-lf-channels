@@ -90,7 +90,7 @@ const segmentSizeShift = 5
 const segmentSize = 1 << segmentSizeShift
 const segmentIndexMask = segmentSize - 1
 const spinThreshold = 0
-const fcStart = 5
+const fcStart = 7
 
 var selectIdGen int64 = 0
 
