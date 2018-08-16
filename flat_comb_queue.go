@@ -32,11 +32,11 @@ const BUFFER_SIZE = 128
 const UNLOCKED = 0
 const LOCKED = 1
 
-func NewFCQueue(c *LFChan) *FCQueue {
+func NewFCQueue(c *LFChan) FCQueue {
 	initNode := &fcnode_initial{}
 	initNode._enqIdx = BUFFER_SIZE
 	initNode.deqIdx = BUFFER_SIZE
-	return &FCQueue{
+	return FCQueue{
 		c:       c,
 		head:    unsafe.Pointer(initNode),
 		_tail:   unsafe.Pointer(initNode),
@@ -98,6 +98,30 @@ func (q *FCQueue) addTaskAndCombine(element unsafe.Pointer, cont unsafe.Pointer)
 	}
 }
 
+func (q *FCQueue) addTaskAndCombineSelect(element unsafe.Pointer, selectInstance *SelectInstance) (bool, RegInfo) {
+	node, idx := q.addTask(element, unsafe.Pointer(selectInstance))
+	spin := 0
+	for atomic.LoadPointer(&node._data[idx * 2 + 1]) != nil {
+		if q.tryAcquireLock() {
+			q.combine(node, idx)
+			q._fclock = UNLOCKED
+			break
+		} else {
+			spin++
+			if spin > 30 {
+				time.Sleep(700)
+			}
+		}
+	}
+	res := node._data[idx * 2]
+	node._data[idx * 2] = nil
+	if res == nil {
+		return false, RegInfo{}
+	} else {
+		return true, *((*RegInfo) (res))
+	}
+}
+
 func (q *FCQueue) tryAcquireLock() bool {
 	if atomic.LoadInt32(&q._fclock) == LOCKED { return false }
 	return atomic.CompareAndSwapInt32(&q._fclock, UNLOCKED, LOCKED)
@@ -121,8 +145,8 @@ func (q *FCQueue) combine(limitNode *fcnode, limitIdx int32) {
 		cont := head._data[idx * 2 + 1]
 		var res unsafe.Pointer
 		if IntType(cont) == SelectInstanceType {
-			q.c.regSelectFC((*SelectInstance) (cont), element)
-			res = nil
+			added, regInfo := q.c.regSelectFC((*SelectInstance) (cont), element)
+			if added { res = unsafe.Pointer(&regInfo) } else { res = nil }
 		} else { // *g
 			res = q.c.sendOrReceiveFC(element, cont)
 		}
