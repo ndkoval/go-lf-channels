@@ -8,34 +8,25 @@ import (
 	"time"
 )
 
+const sendersOffset = 32
 type LFChan struct {
-	_deqIdx int64
-	_enqIdx int64
+	sendersAndReceivers uint64
 
-	_head unsafe.Pointer
-	_tail unsafe.Pointer
+	_data [1 << 25]unsafe.Pointer
 }
 
 func NewLFChan( ) *LFChan {
-	emptyNode := (unsafe.Pointer) (newNode(0, nil))
-	c := &LFChan{
-		_deqIdx: 1,
-		_enqIdx: 1,
-		_head: emptyNode,
-		_tail: emptyNode,
-	}
-	return c
+	return &LFChan{}
 }
 
 type node struct {
-	id          int64
+	id          uint64
 	_next       unsafe.Pointer
-	_data       [segmentSize * 2]unsafe.Pointer
-	_cleaned int32
+	_cleaned 	uint32
 	_prev 		unsafe.Pointer
 }
 
-func newNode(id int64, prev *node) *node {
+func newNode(id uint64, prev *node) *node {
 	return &node{
 		id: id,
 		_next: nil,
@@ -82,9 +73,9 @@ var takenContinuation = (unsafe.Pointer) ((uintptr) (1))
 var takenElement = (unsafe.Pointer) ((uintptr) (2))
 var ReceiverElement = (unsafe.Pointer) ((uintptr) (4096))
 var ParkResult = (unsafe.Pointer) ((uintptr) (4097))
-const segmentSizeShift = 5
-const segmentSize = 1 << segmentSizeShift
-const segmentIndexMask = segmentSize - 1
+const segmentSizeShift = uint32(25)
+const segmentSize = uint32(1 << segmentSizeShift)
+const segmentIndexMask = uint64(segmentSize - 1)
 
 var selectIdGen int64 = 0
 
@@ -108,155 +99,58 @@ func ConsumeCPU(tokens int) {
 	if t == 42 { atomic.StoreInt32(&consumedCPU, consumedCPU + int32(t)) }
 }
 
-
-func (c* LFChan) sendOrReceiveFC(element unsafe.Pointer, cont unsafe.Pointer) unsafe.Pointer {
-	try_again: for { // CAS-loop
-		enqIdx := c.enqIdx()
-		deqIdx := c.deqIdx()
-		if enqIdx < deqIdx {
-			continue try_again
-		}
-		// Check if queue is empty
-		if deqIdx == enqIdx {
-			if c.addToWaitingQueue2(enqIdx, element, cont) {
-				return ParkResult
-			} else {
-				continue try_again
-			}
-		} else {
-			// Queue is not empty
-			head := c.getHead()
-			headId := head.id
-			// check consistency
-			deqIdxNodeId := nodeId(deqIdx)
-			if headId != deqIdxNodeId {
-				if headId < deqIdxNodeId {
-					headNext := head.next()
-					headNextNode := (*node) (headNext)
-					headNextNode._prev = nil
-					c.casHead(head, headNext)
-				} else {
-					c.casDeqIdx(deqIdx, headId << segmentSizeShift)
-
-				}
-				continue try_again
-			}
-			// Read the first element
-			deqIndexInHead := indexInNode(deqIdx)
-			firstElement := head.readElement(deqIndexInHead)
-			// Check that the element is not taken already.
-			if firstElement == takenElement {
-				c.casDeqIdx(deqIdx, deqIdx + 1)
-				continue try_again
-			}
-			// Decide should we make a rendezvous or not
-			makeRendezvous := (element == ReceiverElement) != (firstElement == ReceiverElement)
-			if makeRendezvous {
-				if c.tryResumeContinuation(head, deqIndexInHead, deqIdx, element) {
-					return firstElement
-				} else {
-					continue try_again
-				}
-			} else {
-				if c.addToWaitingQueue2(enqIdx, element, cont) {
-					return ParkResult
-				} else {
-					continue try_again
-				}
-			}
-		}
-	}
-}
-
 func (c* LFChan) sendOrReceive(element unsafe.Pointer) unsafe.Pointer {
-	r := int32(uintptr(element))
-	backoffMaskShift := -5
 	try_again: for { // CAS-loop
- 		enqIdx := c.enqIdx()
-		deqIdx := c.deqIdx()
-		if enqIdx < deqIdx {
-			backoffMaskShift, r = backoff(backoffMaskShift, r)
-			continue try_again
+		var sendersAndReceivers uint64
+		if element == ReceiverElement {
+			sendersAndReceivers = atomic.AddUint64(&c.sendersAndReceivers, 1)
+		} else {
+			sendersAndReceivers = atomic.AddUint64(&c.sendersAndReceivers, 1 << sendersOffset)
 		}
-		// Check if queue is empty
-		if deqIdx == enqIdx {
-			if c.addToWaitingQueue2(enqIdx, element, nil) {
+		senders := sendersAndReceivers >> sendersOffset
+		receivers := sendersAndReceivers & ((1 << sendersOffset) - 1)
+		//println(element == ReceiverElement, senders, receivers)
+		var deqIdx uint64
+		var enqIdx uint64
+		var makeRendezvous bool
+		if senders < receivers {
+			deqIdx = senders
+			enqIdx = receivers
+			makeRendezvous = element != ReceiverElement
+		} else if senders > receivers {
+			deqIdx = receivers
+			enqIdx = senders
+			makeRendezvous = element == ReceiverElement
+		} else {
+			makeRendezvous = true
+			deqIdx = senders
+		}
+		if !makeRendezvous {
+			c._data[enqIdx * 2 + 1] = runtime.GetGoroutine()
+			if atomic.CompareAndSwapPointer(&c._data[enqIdx * 2], nil, element) {
 				return parkAndThenReturn()
-			} else {
-				backoffMaskShift, r = backoff(backoffMaskShift, r)
-				continue try_again
 			}
 		} else {
-			// Queue is not empty
-			head := c.getHead()
-			headId := head.id
-			// check consistency
-			deqIdxNodeId := nodeId(deqIdx)
-			if headId != deqIdxNodeId {
-				if headId < deqIdxNodeId {
-					headNext := head.next()
-					headNextNode := (*node)(headNext)
-					headNextNode._prev = nil
-					c.casHead(head, headNext)
-				} else {
-					c.casDeqIdx(deqIdx, headId<<segmentSizeShift)
-					backoffMaskShift, r = backoff(backoffMaskShift, r)
-				}
-				continue try_again
-			}
-			// Read the first element
-			deqIndexInHead := indexInNode(deqIdx)
-			firstElement := head.readElement(deqIndexInHead)
-			// Check that the element is not taken already.
-			if firstElement == takenElement {
-				c.casDeqIdx(deqIdx, deqIdx+1)
-				backoffMaskShift, r = backoff(backoffMaskShift, r)
-				continue try_again
-			}
-			// Decide should we make a rendezvous or not
-			makeRendezvous := (element == ReceiverElement) != (firstElement == ReceiverElement)
-			if makeRendezvous {
-				if c.tryResumeContinuation(head, deqIndexInHead, deqIdx, element) {
-					return firstElement
-				} else {
-					backoffMaskShift, r = backoff(backoffMaskShift, r)
-					continue try_again
-				}
-			} else {
-				if c.addToWaitingQueue2(enqIdx, element, nil) {
-					return parkAndThenReturn()
-				} else {
-					backoffMaskShift, r = backoff(backoffMaskShift, r)
-					continue try_again
-				}
-			}
+			el := c.readElement(deqIdx)
+			if el == takenElement { continue try_again }
+			cont := c._data[deqIdx * 2 + 1]
+			c._data[deqIdx * 2 + 1] = takenContinuation
+			c._data[deqIdx * 2] = takenElement
+			runtime.SetGParam(cont, element)
+			runtime.UnparkUnsafe(cont)
+			return el
 		}
 	}
-}
-
-func backoff(backoffMaskShift int, r int32) (int, int32) {
-	backoffMaskShift++
-	if backoffMaskShift > 0 {
-		if backoffMaskShift > maxBackoffMaskShift {
-			backoffMaskShift = maxBackoffMaskShift
-		}
-		r ^= r << 13
-		r ^= r >> 17
-		r ^= r << 5
-		backoff := int(r) & ((1 << uint(backoffMaskShift)) - 1)
-		ConsumeCPU(int(backoff))
-	}
-	return backoffMaskShift, r
 }
 
 // Tries to read an element from the specified node
 // at the specified index. Returns this element or
 // marks the slot as broken (sets `TAKEN_ELEMENT` to the slot)
 // and returns `TAKEN_ELEMENT` if the element is unavailable.
-func (n *node) readElement(index int32) unsafe.Pointer {
+func (c *LFChan) readElement(index uint64) unsafe.Pointer {
 	// Element index in `Node#_data` array
 	// Spin wait on the slot
-	elementAddr := &n._data[index * 2]
+	elementAddr := &c._data[index * 2]
 	element := atomic.LoadPointer(elementAddr) // volatile read
 	if element != nil {
 		return element
@@ -266,320 +160,204 @@ func (n *node) readElement(index int32) unsafe.Pointer {
 		return takenElement
 	} else {
 		// The element is set, read it and return
-		return n._data[index * 2]
+		return c._data[index * 2]
 	}
 }
-
-func (c *LFChan) addToWaitingQueue(enqIdx int64, element unsafe.Pointer, cont unsafe.Pointer) (bool, RegInfo) {
-	// Read tail and its id
-	tail := c.getTail()
-	tailId := tail.id
-	// check consistency
-	if enqIdx <= tailId << segmentSizeShift {
-		if enqIdx == tailId << segmentSizeShift {
-			c.casEnqIdx(enqIdx, enqIdx + 1)
-		}
-		return false, RegInfo{}
-	}
-	// Get continuation if needed
-	if cont == nil { cont = runtime.GetGoroutine() }
-	// Check if a new node should be added
-	if enqIdx == (tailId + 1) << segmentSizeShift  {
-		success, node := c.addNewNode(tail, element, enqIdx, cont)
-		if success {
-			return true, RegInfo{node: node, index: 0}
-		}  else { return false, RegInfo{} }
-	}
-	// Just check that `enqIdx` is valid and try to store the current
-	// goroutine into the `tail` by `enqIdxInNode`
-	enqIdxInNode := indexInNode(enqIdx)
-	if c.storeContinuation(tail, enqIdxInNode, enqIdx, element, cont) {
-		return true, RegInfo{node: tail, index: enqIdxInNode}
-	} else { return false, RegInfo{} }
-}
-
-func (c *LFChan) addToWaitingQueue2(enqIdx int64, element unsafe.Pointer, cont unsafe.Pointer) bool {
-	success, _ := c.addToWaitingQueue(enqIdx, element, cont)
-	return success
-}
-
-// Tries to read an element from the specified node
-// at the specified index. Returns the read element or
-// marks the slot as broken (sets `TAKEN_ELEMENT` to the slot)
-// and returns `TAKEN_ELEMENT` if the element is unavailable.
-func (c *LFChan) addNewNode(tail *node, element unsafe.Pointer, enqIdx int64, cont unsafe.Pointer) (bool, *node) {
-	for {
-		// If next node is not null, help to move the tail pointer
-		tailNext := (*node) (tail.next())
-		if tailNext != nil {
-			// If this CAS fails, another thread moved the tail pointer
-			c.casTail(tail, tailNext)
-			c.casEnqIdx(enqIdx, enqIdx + 1) // help
-			return false, nil
-		}
-		// Create a new node with this continuation and element and try to add it
-		newTail := newNode(tail.id + 1, tail)
-		newTail._data[0] = element
-		newTail._data[1] = cont
-		if tail.casNext(nil, unsafe.Pointer(newTail)) {
-			// New node added, try to move tail,
-			// if the CAS fails, another thread moved it.
-			c.casTail(tail, newTail)
-			c.casEnqIdx(enqIdx, enqIdx + 1) // help for others
-			// Remove the previous tail from the waiting queue
-			// if it was marked as logically removed.
-			if tail.isRemoved() {
-				tail.remove()
-			}
-			// Success, return true.
-			return true, newTail
-		} else { continue }
-	}
-}
-
-// Tries to store the current continuation and element (in this order!)
-// to the specified node at the specified index. Returns `true` on success,
-// `false` otherwise`.
-func (c *LFChan) storeContinuation(node *node, indexInNode int32, enqIdx int64, element unsafe.Pointer, cont unsafe.Pointer) bool {
-	// Try to move enqueue index forward, return `false` if fails
-	if !c.casEnqIdx(enqIdx, enqIdx + 1) {
-		return false
-	}
-	// Slot `index` is claimed, try to store the continuation and the element (in this order!) to it.
-	// Can fail if another thread marked this slot as broken, return `false` in this case.
-	node._data[indexInNode * 2 + 1] = cont
-
-	if atomic.CompareAndSwapPointer(&node._data[indexInNode * 2], nil, element) {
-		// Can be suspended, return true
-		return true
-	} else {
-		// The slot is broken, clean it and return `false`
-		node._data[indexInNode * 2 + 1] = takenContinuation
-		return false
-	}
-}
-
-// Try to remove a continuation from the specified node at the
-// specified index and resume it. Returns `true` on success, `false` otherwise.
-func (c *LFChan) tryResumeContinuation(head *node, indexInNode int32, deqIdx int64, element unsafe.Pointer) bool {
-	// Try to move 'deqIdx' forward, return `false` if fails
-	if !c.casDeqIdx(deqIdx, deqIdx + 1) { return false }
-	// Read continuation and CAS it to `takenContinuation`
-	var cont unsafe.Pointer
-	var isContSelectInstance bool
-	for {
-		cont, isContSelectInstance = head.readContinuation(indexInNode)
-		if cont == takenContinuation { return false }
-		if head.casContinuation(indexInNode, cont, takenContinuation) { break }
-	}
-	// Clear element's cell
-	head._data[indexInNode * 2] = takenElement
-	// Try to resume the continuation
-	if isContSelectInstance {
-		selectInstance := (*SelectInstance) (cont)
-		if !selectInstance.trySetDescriptor(unsafe.Pointer(c)) { return false }
-		runtime.SetGParam(selectInstance.gp, element)
-		runtime.UnparkUnsafe(selectInstance.gp)
-		return true
-	} else { // *g
-		runtime.SetGParam(cont, element)
-		runtime.UnparkUnsafe(cont)
-		return true
-	}
-}
-
 
 func (c *LFChan) tryResumeContinuationForSelect(head *node, indexInNode int32, deqIdx int64, element unsafe.Pointer, selectInstance *SelectInstance, firstElement unsafe.Pointer) bool {
 	// Set descriptor at first
-	var desc *SelectDesc
-	var descCont unsafe.Pointer
-	var isDescContSelectInstance bool
-	for {
-		descCont, isDescContSelectInstance = head.readContinuation(indexInNode)
-		if descCont == takenContinuation {
-			c.casDeqIdx(deqIdx, deqIdx + 1)
-			return false
-		}
-		desc = &SelectDesc {
-			__type: SelectDescType,
-			channel: c,
-			selectInstance: selectInstance,
-			cont: descCont,
-		}
-		if head.casContinuation(indexInNode, descCont, unsafe.Pointer(desc)) { break }
-	}
-	// Invoke selectDesc and update the continuation's cell
-	if desc.invoke() {
-		head.setContinuation(indexInNode, takenContinuation)
-	} else {
-		if !selectInstance.isSelected() {
-			head.setContinuation(indexInNode, takenContinuation)
-			c.casDeqIdx(deqIdx, deqIdx + 1)
-			return false
-		}
-		head.casContinuation(indexInNode, unsafe.Pointer(desc), desc.cont)
-		return false
-	}
-	// Move deque index forward
-	c.casDeqIdx(deqIdx, deqIdx + 1)
-	// Resume all continuations
-	var anotherG unsafe.Pointer
-	if isDescContSelectInstance {
-		anotherG = ((*SelectInstance) (descCont)).gp
-	} else {
-		anotherG = descCont
-	}
-	runtime.SetGParam(anotherG, element)
-	runtime.UnparkUnsafe(anotherG)
-	runtime.SetGParam(selectInstance.gp, firstElement)
-	runtime.UnparkUnsafe(selectInstance.gp)
-	return true
+	//var desc *SelectDesc
+	//var descCont unsafe.Pointer
+	//var isDescContSelectInstance bool
+	//for {
+	//	descCont, isDescContSelectInstance = head.readContinuation(indexInNode)
+	//	if descCont == takenContinuation {
+	//		c.casDeqIdx(deqIdx, deqIdx + 1)
+	//		return false
+	//	}
+	//	desc = &SelectDesc {
+	//		__type: SelectDescType,
+	//		channel: c,
+	//		selectInstance: selectInstance,
+	//		cont: descCont,
+	//	}
+	//	if head.casContinuation(indexInNode, descCont, unsafe.Pointer(desc)) { break }
+	//}
+	//// Invoke selectDesc and update the continuation's cell
+	//if desc.invoke() {
+	//	head.setContinuation(indexInNode, takenContinuation)
+	//} else {
+	//	if !selectInstance.isSelected() {
+	//		head.setContinuation(indexInNode, takenContinuation)
+	//		c.casDeqIdx(deqIdx, deqIdx + 1)
+	//		return false
+	//	}
+	//	head.casContinuation(indexInNode, unsafe.Pointer(desc), desc.cont)
+	//	return false
+	//}
+	//// Move deque index forward
+	//c.casDeqIdx(deqIdx, deqIdx + 1)
+	//// Resume all continuations
+	//var anotherG unsafe.Pointer
+	//if isDescContSelectInstance {
+	//	anotherG = ((*SelectInstance) (descCont)).gp
+	//} else {
+	//	anotherG = descCont
+	//}
+	//runtime.SetGParam(anotherG, element)
+	//runtime.UnparkUnsafe(anotherG)
+	//runtime.SetGParam(selectInstance.gp, firstElement)
+	//runtime.UnparkUnsafe(selectInstance.gp)
+	//return true
+	return false
 }
 
-func (n *node) readContinuation(index int32) (cont unsafe.Pointer, isSelectInstance bool) {
-	contPointer := &n._data[index * 2 + 1]
-	for {
-		cont := atomic.LoadPointer(contPointer)
-		if cont == takenContinuation {
-			return takenContinuation, false
-		}
-		contType := IntType(cont)
-		switch contType {
-		case SelectDescType:
-			desc := (*SelectDesc)(cont)
-			if desc.invoke() {
-				atomic.StorePointer(contPointer, takenContinuation)
-				return takenContinuation, false
-			} else {
-				atomic.CompareAndSwapPointer(contPointer, cont, desc.cont)
-				return desc.cont, IntType(desc.cont) == SelectInstanceType
-			}
-		case SelectInstanceType: // *SelectInstance
-			return cont, true
-		default: // *g
-			return cont, false
-		}
-	}
+func (n *node) readContinuation(index uint32) (cont unsafe.Pointer, isSelectInstance bool) {
+	return takenContinuation, false
+	//contPointer := &n._data[index * 2 + 1]
+	//for {
+	//	cont := atomic.LoadPointer(contPointer)
+	//	if cont == takenContinuation {
+	//		return takenContinuation, false
+	//	}
+	//	contType := IntType(cont)
+	//	switch contType {
+	//	case SelectDescType:
+	//		desc := (*SelectDesc)(cont)
+	//		if desc.invoke() {
+	//			atomic.StorePointer(contPointer, takenContinuation)
+	//			return takenContinuation, false
+	//		} else {
+	//			atomic.CompareAndSwapPointer(contPointer, cont, desc.cont)
+	//			return desc.cont, IntType(desc.cont) == SelectInstanceType
+	//		}
+	//	case SelectInstanceType: // *SelectInstance
+	//		return cont, true
+	//	default: // *g
+	//		return cont, false
+	//	}
+	//}
 }
 
 
 // === SELECT ===
 
 func (c *LFChan) regSelect(selectInstance *SelectInstance, element unsafe.Pointer) (bool, RegInfo) {
-	r := int32(uintptr(element))
-	backoffMaskShift := -5
-	try_again: for { // CAS-loop
-		if selectInstance.isSelected() { return false, RegInfo{} }
-		enqIdx := c.enqIdx()
-		deqIdx := c.deqIdx()
-		if enqIdx < deqIdx {
-			backoffMaskShift++
-			if backoffMaskShift > 0 {
-				if  backoffMaskShift > maxBackoffMaskShift { backoffMaskShift = maxBackoffMaskShift }
-				r ^= r << 13
-				r ^= r >> 17
-				r ^= r << 5
-				backoff := int(r) & ((1 << uint(backoffMaskShift)) - 1)
-				ConsumeCPU(int(backoff))
-			}
-			continue try_again
-		}
-		// Check if queue is empty
-		if deqIdx == enqIdx {
-			addSuccess, regInfo := c.addToWaitingQueue(enqIdx, element, unsafe.Pointer(selectInstance))
-			if addSuccess {
-				return true, regInfo
-			} else {
-				backoffMaskShift++
-				if backoffMaskShift > 0 {
-					if  backoffMaskShift > maxBackoffMaskShift { backoffMaskShift = maxBackoffMaskShift }
-					r ^= r << 13
-					r ^= r >> 17
-					r ^= r << 5
-					backoff := int(r) & ((1 << uint(backoffMaskShift)) - 1)
-					ConsumeCPU(int(backoff))
-				}
-				continue try_again
-			}
-		} else {
-			// Queue is not empty
-			head := c.getHead()
-			headId := head.id
-			// check consistency
-			deqIdxNodeId := nodeId(deqIdx)
-			if headId != deqIdxNodeId {
-				if headId < deqIdxNodeId {
-					headNext := head.next()
-					headNextNode := (*node) (headNext)
-					headNextNode._prev = nil
-					c.casHead(head, headNext)
-				} else {
-					c.casDeqIdx(deqIdx, headId << segmentSizeShift)
-					backoffMaskShift++
-					if backoffMaskShift > 0 {
-						if  backoffMaskShift > maxBackoffMaskShift { backoffMaskShift = maxBackoffMaskShift }
-						r ^= r << 13
-						r ^= r >> 17
-						r ^= r << 5
-						backoff := int(r) & ((1 << uint(backoffMaskShift)) - 1)
-						ConsumeCPU(int(backoff))
-					}
-				}
-				continue try_again
-			}
-			// Read the first element
-			deqIndexInHead := indexInNode(deqIdx)
-			firstElement := head.readElement(deqIndexInHead)
-			// Check that the element is not taken already.
-			if firstElement == takenElement {
-				c.casDeqIdx(deqIdx, deqIdx + 1)
-				backoffMaskShift++
-				if backoffMaskShift > 0 {
-					if  backoffMaskShift > maxBackoffMaskShift { backoffMaskShift = maxBackoffMaskShift }
-					r ^= r << 13
-					r ^= r >> 17
-					r ^= r << 5
-					backoff := int(r) & ((1 << uint(backoffMaskShift)) - 1)
-					ConsumeCPU(int(backoff))
-				}
-				continue try_again
-			}
-			// Decide should we make a rendezvous or not
-			makeRendezvous := (element == ReceiverElement && firstElement != ReceiverElement) || (element != ReceiverElement && firstElement == ReceiverElement)
-			if makeRendezvous {
-				if c.tryResumeContinuationForSelect(head, deqIndexInHead, deqIdx, element, selectInstance, firstElement) {
-					return false, RegInfo{}
-				} else {
-					backoffMaskShift++
-					if backoffMaskShift > 0 {
-						if  backoffMaskShift > maxBackoffMaskShift { backoffMaskShift = maxBackoffMaskShift }
-						r ^= r << 13
-						r ^= r >> 17
-						r ^= r << 5
-						backoff := int(r) & ((1 << uint(backoffMaskShift)) - 1)
-						ConsumeCPU(int(backoff))
-					}
-					continue try_again
-				}
-			} else {
-				addSuccess, regInfo := c.addToWaitingQueue(enqIdx, element, unsafe.Pointer(selectInstance))
-				if addSuccess {
-					return true, regInfo
-				} else {
-					backoffMaskShift++
-					if backoffMaskShift > 0 {
-						if  backoffMaskShift > maxBackoffMaskShift { backoffMaskShift = maxBackoffMaskShift }
-						r ^= r << 13
-						r ^= r >> 17
-						r ^= r << 5
-						backoff := int(r) & ((1 << uint(backoffMaskShift)) - 1)
-						ConsumeCPU(int(backoff))
-					}
-					continue try_again
-				}
-			}
-		}
-	}
+	//r := int32(uintptr(element))
+	//backoffMaskShift := -5
+	//try_again: for { // CAS-loop
+	//	if selectInstance.isSelected() { return false, RegInfo{} }
+	//	enqIdx := c.enqIdx()
+	//	deqIdx := c.deqIdx()
+	//	if enqIdx < deqIdx {
+	//		backoffMaskShift++
+	//		if backoffMaskShift > 0 {
+	//			if  backoffMaskShift > maxBackoffMaskShift { backoffMaskShift = maxBackoffMaskShift }
+	//			r ^= r << 13
+	//			r ^= r >> 17
+	//			r ^= r << 5
+	//			backoff := int(r) & ((1 << uint(backoffMaskShift)) - 1)
+	//			ConsumeCPU(int(backoff))
+	//		}
+	//		continue try_again
+	//	}
+	//	// Check if queue is empty
+	//	if deqIdx == enqIdx {
+	//		addSuccess, regInfo := c.addToWaitingQueue(enqIdx, element, unsafe.Pointer(selectInstance))
+	//		if addSuccess {
+	//			return true, regInfo
+	//		} else {
+	//			backoffMaskShift++
+	//			if backoffMaskShift > 0 {
+	//				if  backoffMaskShift > maxBackoffMaskShift { backoffMaskShift = maxBackoffMaskShift }
+	//				r ^= r << 13
+	//				r ^= r >> 17
+	//				r ^= r << 5
+	//				backoff := int(r) & ((1 << uint(backoffMaskShift)) - 1)
+	//				ConsumeCPU(int(backoff))
+	//			}
+	//			continue try_again
+	//		}
+	//	} else {
+	//		// Queue is not empty
+	//		head := c.getHead()
+	//		headId := head.id
+	//		// check consistency
+	//		deqIdxNodeId := nodeId(deqIdx)
+	//		if headId != deqIdxNodeId {
+	//			if headId < deqIdxNodeId {
+	//				headNext := head.next()
+	//				headNextNode := (*node) (headNext)
+	//				headNextNode._prev = nil
+	//				c.casHead(head, headNext)
+	//			} else {
+	//				c.casDeqIdx(deqIdx, headId << segmentSizeShift)
+	//				backoffMaskShift++
+	//				if backoffMaskShift > 0 {
+	//					if  backoffMaskShift > maxBackoffMaskShift { backoffMaskShift = maxBackoffMaskShift }
+	//					r ^= r << 13
+	//					r ^= r >> 17
+	//					r ^= r << 5
+	//					backoff := int(r) & ((1 << uint(backoffMaskShift)) - 1)
+	//					ConsumeCPU(int(backoff))
+	//				}
+	//			}
+	//			continue try_again
+	//		}
+	//		// Read the first element
+	//		deqIndexInHead := indexInNode(deqIdx)
+	//		firstElement := head.readElement(deqIndexInHead)
+	//		// Check that the element is not taken already.
+	//		if firstElement == takenElement {
+	//			c.casDeqIdx(deqIdx, deqIdx + 1)
+	//			backoffMaskShift++
+	//			if backoffMaskShift > 0 {
+	//				if  backoffMaskShift > maxBackoffMaskShift { backoffMaskShift = maxBackoffMaskShift }
+	//				r ^= r << 13
+	//				r ^= r >> 17
+	//				r ^= r << 5
+	//				backoff := int(r) & ((1 << uint(backoffMaskShift)) - 1)
+	//				ConsumeCPU(int(backoff))
+	//			}
+	//			continue try_again
+	//		}
+	//		// Decide should we make a rendezvous or not
+	//		makeRendezvous := (element == ReceiverElement && firstElement != ReceiverElement) || (element != ReceiverElement && firstElement == ReceiverElement)
+	//		if makeRendezvous {
+	//			if c.tryResumeContinuationForSelect(head, deqIndexInHead, deqIdx, element, selectInstance, firstElement) {
+	//				return false, RegInfo{}
+	//			} else {
+	//				backoffMaskShift++
+	//				if backoffMaskShift > 0 {
+	//					if  backoffMaskShift > maxBackoffMaskShift { backoffMaskShift = maxBackoffMaskShift }
+	//					r ^= r << 13
+	//					r ^= r >> 17
+	//					r ^= r << 5
+	//					backoff := int(r) & ((1 << uint(backoffMaskShift)) - 1)
+	//					ConsumeCPU(int(backoff))
+	//				}
+	//				continue try_again
+	//			}
+	//		} else {
+	//			addSuccess, regInfo := c.addToWaitingQueue(enqIdx, element, unsafe.Pointer(selectInstance))
+	//			if addSuccess {
+	//				return true, regInfo
+	//			} else {
+	//				backoffMaskShift++
+	//				if backoffMaskShift > 0 {
+	//					if  backoffMaskShift > maxBackoffMaskShift { backoffMaskShift = maxBackoffMaskShift }
+	//					r ^= r << 13
+	//					r ^= r >> 17
+	//					r ^= r << 5
+	//					backoff := int(r) & ((1 << uint(backoffMaskShift)) - 1)
+	//					ConsumeCPU(int(backoff))
+	//				}
+	//				continue try_again
+	//			}
+	//		}
+	//	}
+	//}
+	return false, RegInfo{}
 }
 
 func (sd *SelectDesc) invoke() bool {
@@ -759,17 +537,18 @@ func (s *SelectInstance) cancelNonSelectedAlternatives() {
 // ==== CLEANING ====
 
 func clean(node *node, index int32) {
-	cont, _ := node.readContinuation(index)
-	if cont == takenContinuation { return }
-	if !node.casContinuation(index, cont, takenContinuation) { return }
-	atomic.StorePointer(&node._data[index * 2], takenElement)
-	if atomic.AddInt32(&node._cleaned, 1) < segmentSize { return }
-	// Remove the node
-	node.remove()
+	//cont, _ := node.readContinuation(index)
+	//if cont == takenContinuation { return }
+	//if !node.casContinuation(index, cont, takenContinuation) { return }
+	//atomic.StorePointer(&node._data[index * 2], takenElement)
+	//if atomic.AddInt32(&node._cleaned, 1) < segmentSize { return }
+	//// Remove the node
+	//node.remove()
 }
 
 func (n *node) isRemoved() bool {
-	return atomic.LoadInt32(&n._cleaned) == segmentSize
+	return false
+	//return atomic.LoadInt32(&n._cleaned) == segmentSize
 }
 
 func (n *node) remove() {
@@ -819,19 +598,19 @@ func (n *node) movePrevLefter(newPrev *node) {
 
 // === FUCKING GOLANG ===
 
-func (c *LFChan) enqIdx() int64 {
-	return atomic.LoadInt64(&c._enqIdx)
+//func (c *LFChan) enqIdx() int64 {
+//	return atomic.LoadInt64(&c._enqIdx)
+//}
+
+//func (c *LFChan) deqIdx() int64 {
+//	return atomic.LoadInt64(&c._deqIdx)
+//}
+
+func indexInNode(index uint64) uint32 {
+	return uint32(index & segmentIndexMask)
 }
 
-func (c *LFChan) deqIdx() int64 {
-	return atomic.LoadInt64(&c._deqIdx)
-}
-
-func indexInNode(index int64) int32 {
-	return int32(index & segmentIndexMask)
-}
-
-func nodeId(index int64) int64 {
+func nodeId(index uint64) uint64 {
 	return index >> segmentSizeShift
 }
 
@@ -839,30 +618,30 @@ func parkAndThenReturn() unsafe.Pointer {
 	runtime.ParkUnsafe()
 	return runtime.GetGParam(runtime.GetGoroutine())
 }
+//
+//func (c *LFChan) casTail(oldTail *node, newTail *node) bool {
+//	return atomic.CompareAndSwapPointer(&c._tail, (unsafe.Pointer) (oldTail), (unsafe.Pointer) (newTail))
+//}
+//
+//func (c *LFChan) getTail() *node {
+//	return (*node) (atomic.LoadPointer(&c._tail))
+//}
+//
+//func (c *LFChan) getHead() *node {
+//	return (*node) (atomic.LoadPointer(&c._head))
+//}
+//
+//func (c *LFChan) casHead(oldHead *node, newHead unsafe.Pointer) bool {
+//	return atomic.CompareAndSwapPointer(&c._head, (unsafe.Pointer) (oldHead), newHead)
+//}
 
-func (c *LFChan) casTail(oldTail *node, newTail *node) bool {
-	return atomic.CompareAndSwapPointer(&c._tail, (unsafe.Pointer) (oldTail), (unsafe.Pointer) (newTail))
-}
+//func (c *LFChan) casEnqIdx(old int64, new int64) bool {
+//	return atomic.CompareAndSwapInt64(&c._enqIdx, old, new)
+//}
 
-func (c *LFChan) getTail() *node {
-	return (*node) (atomic.LoadPointer(&c._tail))
-}
-
-func (c *LFChan) getHead() *node {
-	return (*node) (atomic.LoadPointer(&c._head))
-}
-
-func (c *LFChan) casHead(oldHead *node, newHead unsafe.Pointer) bool {
-	return atomic.CompareAndSwapPointer(&c._head, (unsafe.Pointer) (oldHead), newHead)
-}
-
-func (c *LFChan) casEnqIdx(old int64, new int64) bool {
-	return atomic.CompareAndSwapInt64(&c._enqIdx, old, new)
-}
-
-func (c *LFChan) casDeqIdx(old int64, new int64) bool {
-	return atomic.CompareAndSwapInt64(&c._deqIdx, old, new)
-}
+//func (c *LFChan) casDeqIdx(old int64, new int64) bool {
+//	return atomic.CompareAndSwapInt64(&c._deqIdx, old, new)
+//}
 
 func (sd *SelectDesc) getStatus() int32 {
 	return atomic.LoadInt32(&sd.status)
@@ -903,11 +682,11 @@ func (s *SelectInstance) casState(old, new unsafe.Pointer) bool{
 func IntType(p unsafe.Pointer) int32 {
 	return *(*int32)(p)
 }
-
-func (n *node) casContinuation(index int32, old, new unsafe.Pointer) bool {
-	return atomic.CompareAndSwapPointer(&n._data[index * 2 + 1], old, new)
-}
-
-func (n *node) setContinuation(index int32, cont unsafe.Pointer) {
-	atomic.StorePointer(&n._data[index * 2 + 1], cont)
-}
+//
+//func (n *node) casContinuation(index uint32, old, new unsafe.Pointer) bool {
+//	return atomic.CompareAndSwapPointer(&n._data[index * 2 + 1], old, new)
+//}
+//
+//func (n *node) setContinuation(index int32, cont unsafe.Pointer) {
+//	atomic.StorePointer(&n._data[index * 2 + 1], cont)
+//}
