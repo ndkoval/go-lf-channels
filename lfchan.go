@@ -175,15 +175,7 @@ func (c* LFChan) sendOrReceive(element unsafe.Pointer) unsafe.Pointer {
  		enqIdx := c.enqIdx()
 		deqIdx := c.deqIdx()
 		if enqIdx < deqIdx {
-			backoffMaskShift++
-			if backoffMaskShift > 0 {
-				if  backoffMaskShift > maxBackoffMaskShift { backoffMaskShift = maxBackoffMaskShift }
-				r ^= r << 13
-				r ^= r >> 17
-				r ^= r << 5
-				backoff := int(r) & ((1 << uint(backoffMaskShift)) - 1)
-				ConsumeCPU(int(backoff))
-			}
+			backoffMaskShift, r = backoff(backoffMaskShift, r)
 			continue try_again
 		}
 		// Check if queue is empty
@@ -191,15 +183,7 @@ func (c* LFChan) sendOrReceive(element unsafe.Pointer) unsafe.Pointer {
 			if c.addToWaitingQueue2(enqIdx, element, nil) {
 				return parkAndThenReturn()
 			} else {
-				backoffMaskShift++
-				if backoffMaskShift > 0 {
-					if  backoffMaskShift > maxBackoffMaskShift { backoffMaskShift = maxBackoffMaskShift }
-					r ^= r << 13
-					r ^= r >> 17
-					r ^= r << 5
-					backoff := int(r) & ((1 << uint(backoffMaskShift)) - 1)
-					ConsumeCPU(int(backoff))
-				}
+				backoffMaskShift, r = backoff(backoffMaskShift, r)
 				continue try_again
 			}
 		} else {
@@ -211,20 +195,12 @@ func (c* LFChan) sendOrReceive(element unsafe.Pointer) unsafe.Pointer {
 			if headId != deqIdxNodeId {
 				if headId < deqIdxNodeId {
 					headNext := head.next()
-					headNextNode := (*node) (headNext)
+					headNextNode := (*node)(headNext)
 					headNextNode._prev = nil
 					c.casHead(head, headNext)
 				} else {
-					c.casDeqIdx(deqIdx, headId << segmentSizeShift)
-					backoffMaskShift++
-					if backoffMaskShift > 0 {
-						if  backoffMaskShift > maxBackoffMaskShift { backoffMaskShift = maxBackoffMaskShift }
-						r ^= r << 13
-						r ^= r >> 17
-						r ^= r << 5
-						backoff := int(r) & ((1 << uint(backoffMaskShift)) - 1)
-						ConsumeCPU(int(backoff))
-					}
+					c.casDeqIdx(deqIdx, headId<<segmentSizeShift)
+					backoffMaskShift, r = backoff(backoffMaskShift, r)
 				}
 				continue try_again
 			}
@@ -233,16 +209,8 @@ func (c* LFChan) sendOrReceive(element unsafe.Pointer) unsafe.Pointer {
 			firstElement := head.readElement(deqIndexInHead)
 			// Check that the element is not taken already.
 			if firstElement == takenElement {
-				c.casDeqIdx(deqIdx, deqIdx + 1)
-				backoffMaskShift++
-				if backoffMaskShift > 0 {
-					if  backoffMaskShift > maxBackoffMaskShift { backoffMaskShift = maxBackoffMaskShift }
-					r ^= r << 13
-					r ^= r >> 17
-					r ^= r << 5
-					backoff := int(r) & ((1 << uint(backoffMaskShift)) - 1)
-					ConsumeCPU(int(backoff))
-				}
+				c.casDeqIdx(deqIdx, deqIdx+1)
+				backoffMaskShift, r = backoff(backoffMaskShift, r)
 				continue try_again
 			}
 			// Decide should we make a rendezvous or not
@@ -251,35 +219,34 @@ func (c* LFChan) sendOrReceive(element unsafe.Pointer) unsafe.Pointer {
 				if c.tryResumeContinuation(head, deqIndexInHead, deqIdx, element) {
 					return firstElement
 				} else {
-					backoffMaskShift++
-					if backoffMaskShift > 0 {
-						if  backoffMaskShift > maxBackoffMaskShift { backoffMaskShift = maxBackoffMaskShift }
-						r ^= r << 13
-						r ^= r >> 17
-						r ^= r << 5
-						backoff := int(r) & ((1 << uint(backoffMaskShift)) - 1)
-						ConsumeCPU(int(backoff))
-					}
+					backoffMaskShift, r = backoff(backoffMaskShift, r)
 					continue try_again
 				}
 			} else {
 				if c.addToWaitingQueue2(enqIdx, element, nil) {
 					return parkAndThenReturn()
 				} else {
-					backoffMaskShift++
-					if backoffMaskShift > 0 {
-						if  backoffMaskShift > maxBackoffMaskShift { backoffMaskShift = maxBackoffMaskShift }
-						r ^= r << 13
-						r ^= r >> 17
-						r ^= r << 5
-						backoff := int(r) & ((1 << uint(backoffMaskShift)) - 1)
-						ConsumeCPU(int(backoff))
-					}
+					backoffMaskShift, r = backoff(backoffMaskShift, r)
 					continue try_again
 				}
 			}
 		}
 	}
+}
+
+func backoff(backoffMaskShift int, r int32) (int, int32) {
+	backoffMaskShift++
+	if backoffMaskShift > 0 {
+		if backoffMaskShift > maxBackoffMaskShift {
+			backoffMaskShift = maxBackoffMaskShift
+		}
+		r ^= r << 13
+		r ^= r >> 17
+		r ^= r << 5
+		backoff := int(r) & ((1 << uint(backoffMaskShift)) - 1)
+		ConsumeCPU(int(backoff))
+	}
+	return backoffMaskShift, r
 }
 
 // Tries to read an element from the specified node

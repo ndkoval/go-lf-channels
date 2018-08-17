@@ -7,23 +7,28 @@ import (
 )
 
 func main() {
-	n := 10000000
-	runtime.GOMAXPROCS(2)
+	CPU := 144
+	n := 100000
+	runtime.GOMAXPROCS(CPU)
 	c := NewLFChan()
 	wg := sync.WaitGroup{}
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		for i := 0; i < n; i++ {
-			c.SendInt(i)
-		}
-	}()
-	go func() {
-		defer wg.Done()
-		for i := 0; i < n; i++ {
-			c.ReceiveInt()
-		}
-	}()
+	wg.Add(CPU)
+	for producer := 0; producer < CPU / 2; producer++ {
+		go func() {
+			defer wg.Done()
+			for i := 0; i < n; i++ {
+				c.SendInt(i)
+			}
+		}()
+	}
+	for consumer := 0; consumer < CPU / 2; consumer++ {
+		go func() {
+			defer wg.Done()
+			for i := 0; i < n; i++ {
+				c.ReceiveInt()
+			}
+		}()
+	}
 	wg.Wait()
 }
 
