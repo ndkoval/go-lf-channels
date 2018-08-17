@@ -14,9 +14,6 @@ type LFChan struct {
 
 	_head unsafe.Pointer
 	_tail unsafe.Pointer
-
-
-	fcq FCQueue
 }
 
 func NewLFChan( ) *LFChan {
@@ -27,7 +24,6 @@ func NewLFChan( ) *LFChan {
 		_head: emptyNode,
 		_tail: emptyNode,
 	}
-	c.fcq = NewFCQueue(c)
 	return c
 }
 
@@ -89,8 +85,7 @@ var ParkResult = (unsafe.Pointer) ((uintptr) (4097))
 const segmentSizeShift = 5
 const segmentSize = 1 << segmentSizeShift
 const segmentIndexMask = segmentSize - 1
-const spinThreshold = 0
-const fcStart = 10
+const spinThreshold = 50
 
 var selectIdGen int64 = 0
 
@@ -174,12 +169,10 @@ func (c* LFChan) sendOrReceiveFC(element unsafe.Pointer, cont unsafe.Pointer) un
 }
 
 func (c* LFChan) sendOrReceive(element unsafe.Pointer) unsafe.Pointer {
-	fc := 0
 	try_again: for { // CAS-loop
  		enqIdx := c.enqIdx()
 		deqIdx := c.deqIdx()
 		if enqIdx < deqIdx {
-			fc++; if fc > fcStart { return c.fcq.addTaskAndCombine(element, runtime.GetGoroutine()) }
 			continue try_again
 		}
 		// Check if queue is empty
@@ -187,7 +180,6 @@ func (c* LFChan) sendOrReceive(element unsafe.Pointer) unsafe.Pointer {
 			if c.addToWaitingQueue2(enqIdx, element, nil) {
 				return parkAndThenReturn()
 			} else {
-				fc++; if fc > fcStart { return c.fcq.addTaskAndCombine(element, runtime.GetGoroutine()) }
 				continue try_again
 			}
 		} else {
@@ -204,7 +196,7 @@ func (c* LFChan) sendOrReceive(element unsafe.Pointer) unsafe.Pointer {
 					c.casHead(head, headNext)
 				} else {
 					c.casDeqIdx(deqIdx, headId << segmentSizeShift)
-					fc++; if fc > fcStart { return c.fcq.addTaskAndCombine(element, runtime.GetGoroutine()) }
+
 				}
 				continue try_again
 			}
@@ -214,7 +206,6 @@ func (c* LFChan) sendOrReceive(element unsafe.Pointer) unsafe.Pointer {
 			// Check that the element is not taken already.
 			if firstElement == takenElement {
 				c.casDeqIdx(deqIdx, deqIdx + 1)
-				fc++; if fc > fcStart { return c.fcq.addTaskAndCombine(element, runtime.GetGoroutine()) }
 				continue try_again
 			}
 			// Decide should we make a rendezvous or not
@@ -223,14 +214,13 @@ func (c* LFChan) sendOrReceive(element unsafe.Pointer) unsafe.Pointer {
 				if c.tryResumeContinuation(head, deqIndexInHead, deqIdx, element) {
 					return firstElement
 				} else {
-					fc++; if fc > fcStart { return c.fcq.addTaskAndCombine(element, runtime.GetGoroutine()) }
 					continue try_again
 				}
 			} else {
 				if c.addToWaitingQueue2(enqIdx, element, nil) {
 					return parkAndThenReturn()
 				} else {
-					fc++; if fc > fcStart { return c.fcq.addTaskAndCombine(element, runtime.GetGoroutine()) }
+
 					continue try_again
 				}
 			}
@@ -519,13 +509,11 @@ func (c *LFChan) regSelectFC(selectInstance *SelectInstance, element unsafe.Poin
 }
 
 func (c *LFChan) regSelect(selectInstance *SelectInstance, element unsafe.Pointer) (bool, RegInfo) {
-	fc := 0
 	try_again: for { // CAS-loop
 		if selectInstance.isSelected() { return false, RegInfo{} }
 		enqIdx := c.enqIdx()
 		deqIdx := c.deqIdx()
 		if enqIdx < deqIdx {
-			fc++; if fc > fcStart { return c.fcq.addTaskAndCombineSelect(element, selectInstance) }
 			continue try_again
 		}
 		// Check if queue is empty
@@ -534,7 +522,6 @@ func (c *LFChan) regSelect(selectInstance *SelectInstance, element unsafe.Pointe
 			if addSuccess {
 				return true, regInfo
 			} else {
-				fc++; if fc > fcStart { return c.fcq.addTaskAndCombineSelect(element, selectInstance) }
 				continue try_again
 			}
 		} else {
@@ -551,7 +538,6 @@ func (c *LFChan) regSelect(selectInstance *SelectInstance, element unsafe.Pointe
 					c.casHead(head, headNext)
 				} else {
 					c.casDeqIdx(deqIdx, headId << segmentSizeShift)
-					fc++; if fc > fcStart { return c.fcq.addTaskAndCombineSelect(element, selectInstance) }
 				}
 				continue try_again
 			}
@@ -561,7 +547,6 @@ func (c *LFChan) regSelect(selectInstance *SelectInstance, element unsafe.Pointe
 			// Check that the element is not taken already.
 			if firstElement == takenElement {
 				c.casDeqIdx(deqIdx, deqIdx + 1)
-				fc++; if fc > fcStart { return c.fcq.addTaskAndCombineSelect(element, selectInstance) }
 				continue try_again
 			}
 			// Decide should we make a rendezvous or not
@@ -570,7 +555,6 @@ func (c *LFChan) regSelect(selectInstance *SelectInstance, element unsafe.Pointe
 				if c.tryResumeContinuationForSelect(head, deqIndexInHead, deqIdx, element, selectInstance, firstElement) {
 					return false, RegInfo{}
 				} else {
-					fc++; if fc > fcStart { return c.fcq.addTaskAndCombineSelect(element, selectInstance) }
 					continue try_again
 				}
 			} else {
@@ -578,7 +562,6 @@ func (c *LFChan) regSelect(selectInstance *SelectInstance, element unsafe.Pointe
 				if addSuccess {
 					return true, regInfo
 				} else {
-					fc++; if fc > fcStart { return c.fcq.addTaskAndCombineSelect(element, selectInstance) }
 					continue try_again
 				}
 			}
