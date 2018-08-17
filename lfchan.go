@@ -217,11 +217,13 @@ func (c* LFChan) sendOrReceive(element unsafe.Pointer) unsafe.Pointer {
 					continue try_again
 				}
 			} else {
+				deqIdxLimit := enqIdx
 				if c.addToWaitingQueue2(enqIdx, element, nil) {
 					return parkAndThenReturn()
 				} else {
-
-					continue try_again
+					enqIdx = c.enqIdx()
+					deqIdx = c.deqIdx()
+					if deqIdx >= deqIdxLimit { continue try_again }
 				}
 			}
 		}
@@ -237,11 +239,8 @@ func (n *node) readElement(index int32) unsafe.Pointer {
 	// Spin wait on the slot
 	elementAddr := &n._data[index * 2]
 	element := atomic.LoadPointer(elementAddr) // volatile read
-	for attempt := 0; attempt < spinThreshold; attempt++ {
-		if element != nil {
-			return element
-		}
-		element = atomic.LoadPointer(elementAddr) // volatile read
+	if element != nil {
+		return element
 	}
 	// Cannot spin forever, mark the slot as broken if it is still unavailable
 	if atomic.CompareAndSwapPointer(elementAddr, nil, takenElement) {
@@ -558,11 +557,14 @@ func (c *LFChan) regSelect(selectInstance *SelectInstance, element unsafe.Pointe
 					continue try_again
 				}
 			} else {
+				deqIdxLimit := enqIdx
 				addSuccess, regInfo := c.addToWaitingQueue(enqIdx, element, unsafe.Pointer(selectInstance))
 				if addSuccess {
 					return true, regInfo
 				} else {
-					continue try_again
+					enqIdx = c.enqIdx()
+					deqIdx = c.deqIdx()
+					if deqIdx >= deqIdxLimit { continue try_again }
 				}
 			}
 		}
