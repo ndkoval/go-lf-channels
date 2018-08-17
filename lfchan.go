@@ -81,11 +81,58 @@ var selectIdGen int64 = 0
 
 
 func (c *LFChan) Send(element unsafe.Pointer) {
-	c.sendOrReceive(element)
+	try_again: for { // CAS-loop
+		sendersAndReceivers := atomic.AddUint64(&c.sendersAndReceivers, 1<<sendersOffset)
+		senders := sendersAndReceivers >> sendersOffset
+		receivers := sendersAndReceivers & ((1 << sendersOffset) - 1)
+		if senders <= receivers {
+			deqIdx := senders
+			el := c.readElement(deqIdx)
+			if el == takenElement {
+				continue try_again
+			}
+			cont := c._data[deqIdx*2+1]
+			c._data[deqIdx*2+1] = takenContinuation
+			c._data[deqIdx*2] = takenElement
+			runtime.SetGParam(cont, element)
+			runtime.UnparkUnsafe(cont)
+			return
+		} else {
+			enqIdx := senders
+			c._data[enqIdx*2+1] = runtime.GetGoroutine()
+			if atomic.CompareAndSwapPointer(&c._data[enqIdx*2], nil, element) {
+				runtime.ParkUnsafe()
+				return
+			}
+		}
+	}
 }
 
 func (c *LFChan) Receive() unsafe.Pointer {
-	return c.sendOrReceive(ReceiverElement)
+	try_again: for { // CAS-loop
+		sendersAndReceivers := atomic.AddUint64(&c.sendersAndReceivers, 1)
+		senders := sendersAndReceivers >> sendersOffset
+		receivers := sendersAndReceivers & ((1 << sendersOffset) - 1)
+		if receivers <= senders {
+			deqIdx := receivers
+			el := c.readElement(deqIdx)
+			if el == takenElement {
+				continue try_again
+			}
+			cont := c._data[deqIdx*2+1]
+			c._data[deqIdx*2+1] = takenContinuation
+			c._data[deqIdx*2] = takenElement
+			runtime.SetGParam(cont, ReceiverElement)
+			runtime.UnparkUnsafe(cont)
+			return el
+		} else {
+			enqIdx := receivers
+			c._data[enqIdx*2+1] = runtime.GetGoroutine()
+			if atomic.CompareAndSwapPointer(&c._data[enqIdx*2], nil, ReceiverElement) {
+				return parkAndThenReturn()
+			}
+		}
+	}
 }
 
 const maxBackoffMaskShift = 10
