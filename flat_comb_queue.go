@@ -32,11 +32,11 @@ const BUFFER_SIZE = 128
 const UNLOCKED = 0
 const LOCKED = 1
 
-func NewFCQueue(c *LFChan) FCQueue {
+func NewFCQueue(c *LFChan) *FCQueue {
 	initNode := &fcnode_initial{}
 	initNode._enqIdx = BUFFER_SIZE
 	initNode.deqIdx = BUFFER_SIZE
-	return FCQueue{
+	return &FCQueue{
 		c:       c,
 		head:    unsafe.Pointer(initNode),
 		_tail:   unsafe.Pointer(initNode),
@@ -84,10 +84,11 @@ func (q *FCQueue) addTaskAndCombine(element unsafe.Pointer, cont unsafe.Pointer)
 			break
 		} else {
 			spin++
-			if spin > 30 {
-				time.Sleep(700)
+			if spin > 100 {
+				time.Sleep(1000)
 			}
 		}
+
 	}
 	res := node._data[idx * 2]
 	node._data[idx * 2] = nil
@@ -95,30 +96,6 @@ func (q *FCQueue) addTaskAndCombine(element unsafe.Pointer, cont unsafe.Pointer)
 		return parkAndThenReturn()
 	} else {
 		return res
-	}
-}
-
-func (q *FCQueue) addTaskAndCombineSelect(element unsafe.Pointer, selectInstance *SelectInstance) (bool, RegInfo) {
-	node, idx := q.addTask(element, unsafe.Pointer(selectInstance))
-	spin := 0
-	for atomic.LoadPointer(&node._data[idx * 2 + 1]) != nil {
-		if q.tryAcquireLock() {
-			q.combine(node, idx)
-			q._fclock = UNLOCKED
-			break
-		} else {
-			spin++
-			if spin > 30 {
-				time.Sleep(700)
-			}
-		}
-	}
-	res := node._data[idx * 2]
-	node._data[idx * 2] = nil
-	if res == nil {
-		return false, RegInfo{}
-	} else {
-		return true, *((*RegInfo) (res))
 	}
 }
 
@@ -143,13 +120,7 @@ func (q *FCQueue) combine(limitNode *fcnode, limitIdx int32) {
 		element := atomic.SwapPointer(&head._data[idx * 2], takenElement)
 		if element == nil { continue }
 		cont := head._data[idx * 2 + 1]
-		var res unsafe.Pointer
-		if IntType(cont) == SelectInstanceType {
-			added, regInfo := q.c.regSelectFC((*SelectInstance) (cont), element)
-			if added { res = unsafe.Pointer(&regInfo) } else { res = nil }
-		} else { // *g
-			res = q.c.sendOrReceiveFC(element, cont)
-		}
+		res := q.c.sendOrReceiveFC(element, cont)
 		head._data[idx * 2] = res
 		atomic.StorePointer(&head._data[idx * 2 + 1], nil)
 		if limitNode == head && limitIdx == idx { return }
