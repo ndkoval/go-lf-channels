@@ -12,11 +12,16 @@ const sendersOffset = 32
 type LFChan struct {
 	sendersAndReceivers uint64
 
-	_data [1 << 25]unsafe.Pointer
+	_head unsafe.Pointer
+	_tail unsafe.Pointer
 }
 
 func NewLFChan( ) *LFChan {
-	return &LFChan{}
+	node := unsafe.Pointer(newNode(0, nil))
+	return &LFChan{
+		_head: node,
+		_tail: node,
+	}
 }
 
 type node struct {
@@ -24,6 +29,7 @@ type node struct {
 	_next       unsafe.Pointer
 	_cleaned 	uint32
 	_prev 		unsafe.Pointer
+	_data		[segmentSize * 2]unsafe.Pointer
 }
 
 func newNode(id uint64, prev *node) *node {
@@ -72,8 +78,7 @@ const FAILED = 2
 var takenContinuation = (unsafe.Pointer) ((uintptr) (1))
 var takenElement = (unsafe.Pointer) ((uintptr) (2))
 var ReceiverElement = (unsafe.Pointer) ((uintptr) (4096))
-var ParkResult = (unsafe.Pointer) ((uintptr) (4097))
-const segmentSizeShift = uint32(25)
+const segmentSizeShift = uint32(6)
 const segmentSize = uint32(1 << segmentSizeShift)
 const segmentIndexMask = uint64(segmentSize - 1)
 
@@ -82,25 +87,31 @@ var selectIdGen int64 = 0
 
 func (c *LFChan) Send(element unsafe.Pointer) {
 	try_again: for { // CAS-loop
+		head := c.head()
+		tail := c.tail()
 		sendersAndReceivers := atomic.AddUint64(&c.sendersAndReceivers, 1<<sendersOffset)
 		senders := sendersAndReceivers >> sendersOffset
 		receivers := sendersAndReceivers & ((1 << sendersOffset) - 1)
 		if senders <= receivers {
 			deqIdx := senders
-			el := c.readElement(deqIdx)
+			head = c.getHead(nodeId(deqIdx), head)
+			i := indexInNode(deqIdx)
+			el := head.readElement(i)
 			if el == takenElement {
 				continue try_again
 			}
-			cont := c._data[deqIdx*2+1]
-			c._data[deqIdx*2+1] = takenContinuation
-			c._data[deqIdx*2] = takenElement
+			cont := head._data[i * 2 + 1]
+			head._data[i * 2 + 1] = takenContinuation
+			head._data[i * 2 + 1] = takenElement
 			runtime.SetGParam(cont, element)
 			runtime.UnparkUnsafe(cont)
 			return
 		} else {
 			enqIdx := senders
-			c._data[enqIdx*2+1] = runtime.GetGoroutine()
-			if atomic.CompareAndSwapPointer(&c._data[enqIdx*2], nil, element) {
+			tail := c.getTail(nodeId(enqIdx), tail)
+			i := indexInNode(enqIdx)
+			tail._data[i * 2 + 1] = runtime.GetGoroutine()
+			if atomic.CompareAndSwapPointer(&tail._data[i * 2], nil, element) {
 				runtime.ParkUnsafe()
 				return
 			}
@@ -110,32 +121,66 @@ func (c *LFChan) Send(element unsafe.Pointer) {
 
 func (c *LFChan) Receive() unsafe.Pointer {
 	try_again: for { // CAS-loop
+		head := c.head()
+		tail := c.tail()
 		sendersAndReceivers := atomic.AddUint64(&c.sendersAndReceivers, 1)
 		senders := sendersAndReceivers >> sendersOffset
 		receivers := sendersAndReceivers & ((1 << sendersOffset) - 1)
 		if receivers <= senders {
 			deqIdx := receivers
-			el := c.readElement(deqIdx)
+			head = c.getHead(nodeId(deqIdx), head)
+			i := indexInNode(deqIdx)
+			el := head.readElement(i)
 			if el == takenElement {
 				continue try_again
 			}
-			cont := c._data[deqIdx*2+1]
-			c._data[deqIdx*2+1] = takenContinuation
-			c._data[deqIdx*2] = takenElement
+			cont := head._data[i * 2 + 1]
+			head._data[i * 2 + 1] = takenContinuation
+			head._data[i * 2 + 1] = takenElement
 			runtime.SetGParam(cont, ReceiverElement)
 			runtime.UnparkUnsafe(cont)
 			return el
 		} else {
 			enqIdx := receivers
-			c._data[enqIdx*2+1] = runtime.GetGoroutine()
-			if atomic.CompareAndSwapPointer(&c._data[enqIdx*2], nil, ReceiverElement) {
+			tail := c.getTail(nodeId(enqIdx), tail)
+			i := indexInNode(enqIdx)
+			tail._data[i * 2 + 1] = runtime.GetGoroutine()
+			if atomic.CompareAndSwapPointer(&tail._data[i * 2], nil, ReceiverElement) {
 				return parkAndThenReturn()
 			}
 		}
 	}
 }
 
-const maxBackoffMaskShift = 10
+func (c *LFChan) findOrCreateNode(id uint64, cur *node) *node {
+	for cur.id < id {
+		curNext := cur.next()
+		if curNext == nil {
+			// add new node
+			newTail := newNode(cur.id + 1, cur)
+			if cur.casNext(nil, unsafe.Pointer(newTail)) {
+				c.moveTailForward(newTail)
+				curNext = newTail
+			} else {
+				curNext = cur.next()
+			}
+		}
+		cur = curNext
+	}
+	return cur
+}
+
+func (c *LFChan) getHead(id uint64, cur *node) *node {
+	if cur.id == id { return cur }
+	cur = c.findOrCreateNode(id, cur)
+	c.moveHeadForward(cur)
+	return cur
+}
+
+func (c *LFChan) getTail(id uint64, cur *node) *node {
+	return c.findOrCreateNode(id, cur)
+}
+
 var consumedCPU = int32(time.Now().Unix())
 
 func ConsumeCPU(tokens int) {
@@ -146,58 +191,14 @@ func ConsumeCPU(tokens int) {
 	if t == 42 { atomic.StoreInt32(&consumedCPU, consumedCPU + int32(t)) }
 }
 
-func (c* LFChan) sendOrReceive(element unsafe.Pointer) unsafe.Pointer {
-	try_again: for { // CAS-loop
-		var sendersAndReceivers uint64
-		if element == ReceiverElement {
-			sendersAndReceivers = atomic.AddUint64(&c.sendersAndReceivers, 1)
-		} else {
-			sendersAndReceivers = atomic.AddUint64(&c.sendersAndReceivers, 1 << sendersOffset)
-		}
-		senders := sendersAndReceivers >> sendersOffset
-		receivers := sendersAndReceivers & ((1 << sendersOffset) - 1)
-		//println(element == ReceiverElement, senders, receivers)
-		var deqIdx uint64
-		var enqIdx uint64
-		var makeRendezvous bool
-		if senders < receivers {
-			deqIdx = senders
-			enqIdx = receivers
-			makeRendezvous = element != ReceiverElement
-		} else if senders > receivers {
-			deqIdx = receivers
-			enqIdx = senders
-			makeRendezvous = element == ReceiverElement
-		} else {
-			makeRendezvous = true
-			deqIdx = senders
-		}
-		if !makeRendezvous {
-			c._data[enqIdx * 2 + 1] = runtime.GetGoroutine()
-			if atomic.CompareAndSwapPointer(&c._data[enqIdx * 2], nil, element) {
-				return parkAndThenReturn()
-			}
-		} else {
-			el := c.readElement(deqIdx)
-			if el == takenElement { continue try_again }
-			cont := c._data[deqIdx * 2 + 1]
-			c._data[deqIdx * 2 + 1] = takenContinuation
-			c._data[deqIdx * 2] = takenElement
-			runtime.SetGParam(cont, element)
-			runtime.UnparkUnsafe(cont)
-			return el
-		}
-	}
-}
-
 // Tries to read an element from the specified node
 // at the specified index. Returns this element or
 // marks the slot as broken (sets `TAKEN_ELEMENT` to the slot)
 // and returns `TAKEN_ELEMENT` if the element is unavailable.
-func (c *LFChan) readElement(index uint64) unsafe.Pointer {
+func (n *node) readElement(index uint32) unsafe.Pointer {
 	// Element index in `Node#_data` array
 	// Spin wait on the slot
-	elementAddr := &c._data[index * 2]
+	elementAddr := &n._data[index * 2]
 	element := atomic.LoadPointer(elementAddr) // volatile read
 	if element != nil {
 		return element
@@ -207,7 +208,7 @@ func (c *LFChan) readElement(index uint64) unsafe.Pointer {
 		return takenElement
 	} else {
 		// The element is set, read it and return
-		return c._data[index * 2]
+		return n._data[index * 2]
 	}
 }
 
@@ -327,7 +328,7 @@ func (c *LFChan) regSelect(selectInstance *SelectInstance, element unsafe.Pointe
 	//		}
 	//	} else {
 	//		// Queue is not empty
-	//		head := c.getHead()
+	//		head := c.head()
 	//		headId := head.id
 	//		// check consistency
 	//		deqIdxNodeId := nodeId(deqIdx)
@@ -600,10 +601,10 @@ func (n *node) isRemoved() bool {
 
 func (n *node) remove() {
 	if true { return }
-	next := (*node) (n.next())
+	next := n.next()
 	if next == nil { return }
 	for next.isRemoved() {
-		newNext := (*node) (next.next())
+		newNext := next.next()
 		if newNext == nil { break }
 		next = newNext
 	}
@@ -629,7 +630,7 @@ func (n *node) moveNextRighter(newNext *node) {
 		curNext := n.next()
 		curNextNode := (*node) (curNext)
 		if curNextNode.id >= newNext.id { return }
-		if n.casNext(curNext, unsafe.Pointer(newNext)) { return }
+		if n.casNext(unsafe.Pointer(curNext), unsafe.Pointer(newNext)) { return }
 	}
 }
 
@@ -665,30 +666,30 @@ func parkAndThenReturn() unsafe.Pointer {
 	runtime.ParkUnsafe()
 	return runtime.GetGParam(runtime.GetGoroutine())
 }
-//
-//func (c *LFChan) casTail(oldTail *node, newTail *node) bool {
-//	return atomic.CompareAndSwapPointer(&c._tail, (unsafe.Pointer) (oldTail), (unsafe.Pointer) (newTail))
-//}
-//
-//func (c *LFChan) getTail() *node {
-//	return (*node) (atomic.LoadPointer(&c._tail))
-//}
-//
-//func (c *LFChan) getHead() *node {
-//	return (*node) (atomic.LoadPointer(&c._head))
-//}
-//
-//func (c *LFChan) casHead(oldHead *node, newHead unsafe.Pointer) bool {
-//	return atomic.CompareAndSwapPointer(&c._head, (unsafe.Pointer) (oldHead), newHead)
-//}
 
-//func (c *LFChan) casEnqIdx(old int64, new int64) bool {
-//	return atomic.CompareAndSwapInt64(&c._enqIdx, old, new)
-//}
+func (c *LFChan) head() *node {
+	return (*node) (atomic.LoadPointer(&c._head))
+}
 
-//func (c *LFChan) casDeqIdx(old int64, new int64) bool {
-//	return atomic.CompareAndSwapInt64(&c._deqIdx, old, new)
-//}
+func (c *LFChan) tail() *node {
+	return (*node) (atomic.LoadPointer(&c._tail))
+}
+
+func (c *LFChan) moveHeadForward(new *node) {
+	for {
+		cur := c.head()
+		if cur.id > new.id { return }
+		if atomic.CompareAndSwapPointer(&c._head, unsafe.Pointer(cur), unsafe.Pointer(new)) { return }
+	}
+}
+
+func (c *LFChan) moveTailForward(new *node) {
+	for {
+		cur := c.tail()
+		if cur.id > new.id { return }
+		if atomic.CompareAndSwapPointer(&c._tail, unsafe.Pointer(cur), unsafe.Pointer(new)) { return }
+	}
+}
 
 func (sd *SelectDesc) getStatus() int32 {
 	return atomic.LoadInt32(&sd.status)
@@ -698,8 +699,8 @@ func (sd *SelectDesc) setStatus(status int32) {
 	atomic.StoreInt32(&sd.status, status)
 }
 
-func (n *node) next() unsafe.Pointer {
-	return atomic.LoadPointer(&n._next)
+func (n *node) next() *node {
+	return (*node) (atomic.LoadPointer(&n._next))
 }
 
 func (n *node) casNext(old, new unsafe.Pointer) bool {

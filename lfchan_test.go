@@ -309,7 +309,7 @@ func testCancellation(t *testing.T) {
 	}
 	// After this all nodes except for head and tail should be removed from
 	// the dummy channel. Wait for a bit at first.
-	//head := dummy.getHead()
+	//head := dummy.head()
 	//headNext := (*node) (head.next())
 	//tail := dummy.getTail()
 	//if head == tail || headNext == tail { return }
