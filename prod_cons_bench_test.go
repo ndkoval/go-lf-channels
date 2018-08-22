@@ -12,44 +12,50 @@ import (
 )
 
 const useProfiler = false
-const kovalAlgo = true
 const approxBatchSize = 100000
-var parallelism = []int{1}
+var parallelism = []int{1, 2, 4, 8, 16, 32, 64, 128, 144}
 var goroutines = []int{1000, 10000}
 var work = []int{100}
 
 func BenchmarkN1(b *testing.B) {
-	for _, withSelect := range [2]bool{false, true} {
-		for _, work := range work {
-			for _, parallelism := range parallelism {
-				consumers := 1
-				producers := parallelism - 1
-				if producers == 0 { producers = 1 }
-				// Then run benchmarks
-				for times := 0; times < 10; times++ {
-					runBenchmark(b, producers, consumers, parallelism, withSelect, work)
+	for _, kovalAlgo := range [2]bool{false, true} {
+		for _, withSelect := range [2]bool{false, true} {
+			for _, work := range work {
+				for _, goroutines := range goroutines {
+					for _, parallelism := range parallelism {
+						consumers := 1
+						producers := goroutines - 1
+						if producers == 0 {
+							producers = 1
+						}
+						// Then run benchmarks
+						for times := 0; times < 10; times++ {
+							runBenchmark(b, producers, consumers, parallelism, withSelect, work, kovalAlgo)
+						}
+					}
 				}
 			}
 		}
 	}
 }
-
 
 func BenchmarkNN(b *testing.B) {
-	for _, withSelect := range [1]bool{false} {
-		for _, work := range work {
-			for _, goroutines := range goroutines {
-				for _, parallelism := range parallelism {
-					var producers, consumers int
-					if goroutines == 0 {
-						producers = (parallelism + 1) / 2
-					} else {
-						producers = goroutines / 2
-					}
-					consumers = producers
-					// Then run benchmarks
-					for times := 0; times < 10; times++ {
-						runBenchmark(b, producers, consumers, parallelism, withSelect, work)
+	for _, kovalAlgo := range [2]bool{false, true} {
+		for _, withSelect := range [2]bool{false, true} {
+			for _, work := range work {
+				for _, goroutines := range goroutines {
+					for _, parallelism := range parallelism {
+						var producers, consumers int
+						if goroutines == 0 {
+							producers = (parallelism + 1) / 2
+						} else {
+							producers = goroutines / 2
+						}
+						consumers = producers
+						// Then run benchmarks
+						for times := 0; times < 10; times++ {
+							runBenchmark(b, producers, consumers, parallelism, withSelect, work, kovalAlgo)
+						}
 					}
 				}
 			}
@@ -57,7 +63,7 @@ func BenchmarkNN(b *testing.B) {
 	}
 }
 
-func runBenchmark(b *testing.B, producers int, consumers int, parallelism int, withSelect bool, work int) {
+func runBenchmark(b *testing.B, producers int, consumers int, parallelism int, withSelect bool, work int, kovalAlgo bool) {
 	if useProfiler {
 		runtime.SetCPUProfileRate(1000)
 		f, err := os.Create(fmt.Sprintf("cur_S%tT%dW%d.pprof", withSelect, parallelism, work))
@@ -71,8 +77,8 @@ func runBenchmark(b *testing.B, producers int, consumers int, parallelism int, w
 	// Set benchmark parameters
 	n := (approxBatchSize) / producers * producers
 	// Do producer-consumer work in goroutines
-	b.Run(fmt.Sprintf("withSelect=%t/work=%d/goroutines=%d/threads=%d",
-		withSelect, work, producers + consumers, parallelism),
+	b.Run(fmt.Sprintf("kovalAlgo=%t/withSelect=%t/work=%d/goroutines=%d/threads=%d",
+		kovalAlgo, withSelect, work, producers + consumers, parallelism),
 		func(b *testing.B) {
 			//runtime.GOMAXPROCS(parallelism)
 			b.N = n
