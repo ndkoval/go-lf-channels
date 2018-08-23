@@ -29,7 +29,7 @@ type node struct {
 	_next    unsafe.Pointer
 	_cleaned uint32
 	_prev    unsafe.Pointer
-	data     [segmentSize * 2]unsafe.Pointer
+	data     [segmentSize]unsafe.Pointer
 }
 
 func newNode(id uint64, prev *node) *node {
@@ -96,18 +96,13 @@ func (c *LFChan) Send(element unsafe.Pointer) {
 			deqIdx := senders
 			head = c.getHead(nodeId(deqIdx), head)
 			i := indexInNode(deqIdx)
-			el := atomic.LoadPointer(&head.data[i * 2])
-			if el == nil {
-				if atomic.CompareAndSwapPointer(&head.data[i * 2], nil, element) {
-					return
-				} else {
-					el = atomic.LoadPointer(&head.data[i * 2])
-				}
-			}
 			var cont unsafe.Pointer
 			var isSelectInstance bool
 			for {
-				cont, isSelectInstance = head.readContinuation(i)
+				cont, isSelectInstance = head.readContinuation(i, element)
+				if cont == element {
+					return // done
+				}
 				if cont == takenContinuation {
 					continue try_again
 				}
@@ -115,7 +110,6 @@ func (c *LFChan) Send(element unsafe.Pointer) {
 					break
 				}
 			}
-			head.data[i * 2] = takenElement
 			if isSelectInstance {
 				selectInstance := (*SelectInstance) (cont)
 				if !selectInstance.trySetDescriptor(unsafe.Pointer(c)) {
@@ -132,10 +126,13 @@ func (c *LFChan) Send(element unsafe.Pointer) {
 			enqIdx := senders
 			tail := c.getTail(nodeId(enqIdx), tail)
 			i := indexInNode(enqIdx)
-			tail.data[i * 2 + 1] = runtime.GetGoroutine()
-			if atomic.CompareAndSwapPointer(&tail.data[i * 2], nil, element) {
+			curG := runtime.GetGoroutine()
+			runtime.SetGParam(curG, element)
+			if atomic.CompareAndSwapPointer(&tail.data[i], nil, curG) {
 				runtime.ParkUnsafe()
 				return
+			} else {
+				runtime.SetGParam(curG, nil)
 			}
 		}
 	}
@@ -152,14 +149,10 @@ func (c *LFChan) Receive() unsafe.Pointer {
 			deqIdx := receivers
 			head = c.getHead(nodeId(deqIdx), head)
 			i := indexInNode(deqIdx)
-			el := head.readElement(i)
-			if el == takenElement {
-				continue try_again
-			}
 			var cont unsafe.Pointer
 			var isSelectInstance bool
 			for {
-				cont, isSelectInstance = head.readContinuation(i)
+				cont, isSelectInstance = head.readContinuation(i, takenContinuation)
 				if cont == takenContinuation {
 					continue try_again
 				}
@@ -167,28 +160,30 @@ func (c *LFChan) Receive() unsafe.Pointer {
 					break
 				}
 			}
-			head.data[i * 2] = takenElement
 			if isSelectInstance {
 				selectInstance := (*SelectInstance) (cont)
 				if !selectInstance.trySetDescriptor(unsafe.Pointer(c)) {
 					continue try_again
 				}
 				runtime.UnparkUnsafe(selectInstance.gp)
+				return nil // todo find it
 			} else {
+				res := runtime.GetGParam(cont)
+				runtime.SetGParam(cont, nil)
 				runtime.UnparkUnsafe(cont)
+				return res
 			}
-			return el
 		} else {
 			enqIdx := receivers
 			tail := c.getTail(nodeId(enqIdx), tail)
 			i := indexInNode(enqIdx)
-			tail.data[i * 2 + 1] = runtime.GetGoroutine()
-			if atomic.CompareAndSwapPointer(&tail.data[i * 2], nil, ReceiverElement) {
+			curG := runtime.GetGoroutine()
+			if atomic.CompareAndSwapPointer(&tail.data[i], nil, curG) {
 				return parkAndThenReturn()
 			} else {
-				res := atomic.LoadPointer(&tail.data[i * 2])
+				res := atomic.LoadPointer(&tail.data[i])
 				if res == takenElement { continue try_again }
-				tail.data[i * 2] = nil
+				tail.data[i] = takenContinuation
 				return res
 			}
 		}
@@ -257,10 +252,14 @@ func (n *node) readElement(index uint32) unsafe.Pointer {
 	}
 }
 
-func (n *node) readContinuation(index uint32) (cont unsafe.Pointer, isSelectInstance bool) {
-	contPointer := &n.data[index * 2 + 1]
+func (n *node) readContinuation(i uint32, element unsafe.Pointer) (cont unsafe.Pointer, isSelectInstance bool) {
 	for {
-		cont := atomic.LoadPointer(contPointer)
+		cont := atomic.LoadPointer(&n.data[i])
+		if cont == nil {
+			if atomic.CompareAndSwapPointer(&n.data[i], nil, element) {
+				return element, false
+			} else { continue }
+		}
 		if cont == takenContinuation {
 			return takenContinuation, false
 		}
@@ -269,10 +268,10 @@ func (n *node) readContinuation(index uint32) (cont unsafe.Pointer, isSelectInst
 		case SelectDescType:
 			desc := (*SelectDesc)(cont)
 			if desc.invoke() {
-				atomic.StorePointer(contPointer, takenContinuation)
+				atomic.StorePointer(&n.data[i], takenContinuation)
 				return takenContinuation, false
 			} else {
-				atomic.CompareAndSwapPointer(contPointer, cont, desc.cont)
+				atomic.CompareAndSwapPointer(&n.data[i], cont, desc.cont)
 				return desc.cont, IntType(desc.cont) == SelectInstanceType
 			}
 		case SelectInstanceType: // *SelectInstance
@@ -315,7 +314,7 @@ func (c *LFChan) regSelectForSend(selectInstance *SelectInstance, element unsafe
 			var descCont unsafe.Pointer
 			var isDescContSelectInstance bool
 			for {
-				descCont, isDescContSelectInstance = head.readContinuation(i)
+				descCont, isDescContSelectInstance = head.readContinuation(i, takenContinuation)
 				if descCont == takenContinuation {
 					c.moveSendersForward(senders + 1)
 					continue try_again
@@ -393,7 +392,7 @@ func (c *LFChan) regSelectForReceive(selectInstance *SelectInstance) (added bool
 			var descCont unsafe.Pointer
 			var isDescContSelectInstance bool
 			for {
-				descCont, isDescContSelectInstance = head.readContinuation(i)
+				descCont, isDescContSelectInstance = head.readContinuation(i, takenContinuation)
 				if descCont == takenContinuation {
 					c.moveReceiversForward(receivers + 1)
 					continue try_again
@@ -649,7 +648,7 @@ func (s *SelectInstance) cancelNonSelectedAlternatives() {
 // ==== CLEANING ====
 
 func clean(node *node, index uint32) {
-	cont, _ := node.readContinuation(index)
+	cont, _ := node.readContinuation(index, takenContinuation)
 	if cont == takenContinuation { return }
 	if !node.casContinuation(index, cont, takenContinuation) { return }
 	atomic.StorePointer(&node.data[index * 2], takenElement)
@@ -783,9 +782,9 @@ func IntType(p unsafe.Pointer) int32 {
 }
 
 func (n *node) casContinuation(index uint32, old, new unsafe.Pointer) bool {
-	return atomic.CompareAndSwapPointer(&n.data[index * 2 + 1], old, new)
+	return atomic.CompareAndSwapPointer(&n.data[index], old, new)
 }
 
 func (n *node) setContinuation(index uint32, cont unsafe.Pointer) {
-	atomic.StorePointer(&n.data[index * 2 + 1], cont)
+	atomic.StorePointer(&n.data[index], cont)
 }
