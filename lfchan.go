@@ -9,8 +9,19 @@ import (
 )
 
 const sendersOffset = 32
+const receiversMask = (1 << sendersOffset) - 1
+
+const sendersInc = 1 << sendersOffset
+const receiversInc = 1
+
+func getSendersAndReceivers(state uint64) (senders uint64, receivers uint64) {
+	senders = state >> sendersOffset
+	receivers = state & receiversMask
+	return
+}
+
 type LFChan struct {
-	sendersAndReceivers uint64
+	state uint64
 
 	_head unsafe.Pointer
 	_tail unsafe.Pointer
@@ -89,9 +100,8 @@ func (c *LFChan) Send(element unsafe.Pointer) {
 	try_again: for { // CAS-loop
 		head := c.head()
 		tail := c.tail()
-		sendersAndReceivers := atomic.AddUint64(&c.sendersAndReceivers, 1 << sendersOffset)
-		senders := sendersAndReceivers >> sendersOffset
-		receivers := sendersAndReceivers & ((1 << sendersOffset) - 1)
+		state := atomic.AddUint64(&c.state, sendersInc)
+		senders, receivers := getSendersAndReceivers(state)
 		if senders <= receivers {
 			deqIdx := senders
 			head = c.getHead(nodeId(deqIdx), head)
@@ -142,9 +152,8 @@ func (c *LFChan) Receive() unsafe.Pointer {
 	try_again: for { // CAS-loop
 		head := c.head()
 		tail := c.tail()
-		sendersAndReceivers := atomic.AddUint64(&c.sendersAndReceivers, 1)
-		senders := sendersAndReceivers >> sendersOffset
-		receivers := sendersAndReceivers & ((1 << sendersOffset) - 1)
+		state := atomic.AddUint64(&c.state, receiversInc)
+		senders, receivers := getSendersAndReceivers(state)
 		if receivers <= senders {
 			deqIdx := receivers
 			head = c.getHead(nodeId(deqIdx), head)
@@ -297,7 +306,7 @@ func (c *LFChan) regSelectForSend(selectInstance *SelectInstance, element unsafe
 	try_again: for { // CAS-loop
 		head := c.head()
 		tail := c.tail()
-		sendersAndReceivers := atomic.LoadUint64(&c.sendersAndReceivers)
+		sendersAndReceivers := atomic.LoadUint64(&c.state)
 		senders := sendersAndReceivers >> sendersOffset
 		receivers := sendersAndReceivers & ((1 << sendersOffset) - 1)
 		if (senders + 1) <= receivers {
@@ -355,7 +364,7 @@ func (c *LFChan) regSelectForSend(selectInstance *SelectInstance, element unsafe
 			return false, RegInfo{}
 		} else {
 			newSenderAndReceivers := (senders + 1) << sendersOffset + receivers
-			if !atomic.CompareAndSwapUint64(&c.sendersAndReceivers, sendersAndReceivers, newSenderAndReceivers) {
+			if !atomic.CompareAndSwapUint64(&c.state, sendersAndReceivers, newSenderAndReceivers) {
 				continue try_again
 			}
 			enqIdx := senders + 1
@@ -375,7 +384,7 @@ func (c *LFChan) regSelectForReceive(selectInstance *SelectInstance) (added bool
 	try_again: for { // CAS-loop
 		head := c.head()
 		tail := c.tail()
-		sendersAndReceivers := atomic.LoadUint64(&c.sendersAndReceivers)
+		sendersAndReceivers := atomic.LoadUint64(&c.state)
 		senders := sendersAndReceivers >> sendersOffset
 		receivers := sendersAndReceivers & ((1 << sendersOffset) - 1)
 		if (receivers + 1) <= senders {
@@ -433,7 +442,7 @@ func (c *LFChan) regSelectForReceive(selectInstance *SelectInstance) (added bool
 			return false, RegInfo{}
 		} else {
 			newSenderAndReceivers := senders << sendersOffset + (receivers + 1)
-			if !atomic.CompareAndSwapUint64(&c.sendersAndReceivers, sendersAndReceivers, newSenderAndReceivers) {
+			if !atomic.CompareAndSwapUint64(&c.state, sendersAndReceivers, newSenderAndReceivers) {
 				continue try_again
 			}
 			enqIdx := receivers + 1
@@ -451,22 +460,22 @@ func (c *LFChan) regSelectForReceive(selectInstance *SelectInstance) (added bool
 
 func (c *LFChan) moveSendersForward(new uint64) {
 	for {
-		sendersAndReceivers := atomic.LoadUint64(&c.sendersAndReceivers)
+		sendersAndReceivers := atomic.LoadUint64(&c.state)
 		senders := sendersAndReceivers >> sendersOffset
 		if senders >= new { return }
 		receivers := sendersAndReceivers & ((1 << sendersOffset) - 1)
-		if atomic.CompareAndSwapUint64(&c.sendersAndReceivers, sendersAndReceivers,
+		if atomic.CompareAndSwapUint64(&c.state, sendersAndReceivers,
 			(senders + 1) << sendersOffset + receivers) { return }
 	}
 }
 
 func (c *LFChan) moveReceiversForward(new uint64) {
 	for {
-		sendersAndReceivers := atomic.LoadUint64(&c.sendersAndReceivers)
+		sendersAndReceivers := atomic.LoadUint64(&c.state)
 		receivers := sendersAndReceivers & ((1 << sendersOffset) - 1)
 		if receivers >= new { return }
 		senders := sendersAndReceivers >> sendersOffset
-		if atomic.CompareAndSwapUint64(&c.sendersAndReceivers, sendersAndReceivers,
+		if atomic.CompareAndSwapUint64(&c.state, sendersAndReceivers,
 			senders << sendersOffset + (receivers + 1)) { return }
 	}
 }
