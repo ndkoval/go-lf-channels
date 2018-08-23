@@ -17,9 +17,9 @@ func TestSimple(t *testing.T) {
 	if x != 10 { t.Fatal("Expected ", 10, ", found ", x) }
 }
 
-func testSimpleSendAndReceiveWithSelect(t *testing.T) {
+func TestSimpleSendAndReceiveWithSelect(t *testing.T) {
 	c1 := NewLFChan()
-	c2 := NewLFChan()
+	dummy := NewLFChan()
 	N := 1000
 	// Run sender
 	go func() {
@@ -31,7 +31,7 @@ func testSimpleSendAndReceiveWithSelect(t *testing.T) {
 	for i := 0; i < N; i++ {
 		Select(
 			SelectAlternative{
-				channel: c2,
+				channel: dummy,
 				element: ReceiverElement,
 				action:  func(result unsafe.Pointer) { t.Fatal("Impossible") },
 			},
@@ -49,7 +49,7 @@ func testSimpleSendAndReceiveWithSelect(t *testing.T) {
 	}
 }
 
-func testSimpleSelects(t *testing.T) {
+func TestSimpleSelects(t *testing.T) {
 	c1 := NewLFChan()
 	c2 := NewLFChan()
 	N := 1000
@@ -123,7 +123,7 @@ func TestStress(t *testing.T) {
 	wg.Wait()
 }
 
-func testStressWithSelectOnReceive(t *testing.T) {
+func TestStressWithSelectOnReceive(t *testing.T) {
 	n := 500000
 	k := 2
 	c := NewLFChan()
@@ -165,14 +165,9 @@ func testStressWithSelectOnReceive(t *testing.T) {
 			}
 		}()
 	}
-	//go func() {
-	//	time.Sleep(3 * time.Second)
-	//	pprof.Lookup("goroutine").WriteTo(os.Stdout, 1)
-	//}()
-	wg.Wait()
 }
 
-func testStressSelects(t *testing.T) {
+func TestStressSelects(t *testing.T) {
 	n := 500000
 	k := 3
 	c := NewLFChan()
@@ -224,9 +219,9 @@ func testStressSelects(t *testing.T) {
 }
 
 
-func testStressBothSendAndReceiveSelect(t *testing.T) {
+func TestStressBothSendAndReceiveSelect(t *testing.T) {
 	n := 50000
-	k := 10
+	k := 1
 	c1 := NewLFChan()
 	c2 := NewLFChan()
 	wg := sync.WaitGroup{}
