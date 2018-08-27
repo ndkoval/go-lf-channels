@@ -102,6 +102,8 @@ func (c *LFChan) Send(element unsafe.Pointer) {
 		tail := c.tail()
 		state := atomic.AddUint64(&c.state, sendersInc)
 		senders, receivers := getSendersAndReceivers(state)
+		c.head()
+		c.tail()
 		if senders <= receivers {
 			deqIdx := senders
 			head = c.getHead(nodeId(deqIdx), head)
@@ -154,6 +156,8 @@ func (c *LFChan) Receive() unsafe.Pointer {
 		tail := c.tail()
 		state := atomic.AddUint64(&c.state, receiversInc)
 		senders, receivers := getSendersAndReceivers(state)
+		c.head()
+		c.tail()
 		if receivers <= senders {
 			deqIdx := receivers
 			head = c.getHead(nodeId(deqIdx), head)
