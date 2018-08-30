@@ -32,6 +32,11 @@ func main() {
 	wg.Wait()
 }
 
+func IsGoroutine(p unsafe.Pointer) bool {
+	g_type := (*uint32) (unsafe.Pointer(uintptr(p) + 32))
+	return (*g_type) == 0
+}
+
 func IntToUnsafePointer(x int) unsafe.Pointer {
 	return (unsafe.Pointer)((uintptr)(x + 6000))
 }
