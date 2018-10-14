@@ -93,7 +93,7 @@ func testSimpleSelects(t *testing.T) {
 }
 
 func TestStress(t *testing.T) {
-	n := 1000000
+	n := 500000
 	k := 10
 	c := NewLFChan()
 	wg := sync.WaitGroup{}
@@ -304,17 +304,17 @@ func testCancellation(t *testing.T) {
 	}
 	// After this all nodes except for head and tail should be removed from
 	// the dummy channel. Wait for a bit at first.
-	//head := dummy.head()
-	//headNext := (*node) (head.next())
-	//tail := dummy.tail()
-	//if head == tail || headNext == tail { return }
-	//
-	//cur := head
-	//for cur.next() != tail {
-	//	println(cur.id)
-	//	cur = cur.next()
-	//}
-	//println(tail.id)
+	head := dummy.head()
+	headNext := (*node) (head.next())
+	tail := dummy.tail()
+	if head == tail || headNext == tail { return }
+
+	cur := head
+	for cur.next() != tail {
+		println(cur.id)
+		cur = cur.next()
+	}
+	println(tail.id)
 
 	t.Fatal("Channel contains empy nodes which are niether head or tail:")
 }
