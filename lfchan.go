@@ -14,6 +14,98 @@ const receiversMask = (1 << sendersOffset) - 1
 const sendersInc = 1 << sendersOffset
 const receiversInc = 1
 
+const overflow = 1 << 31
+
+type SRCounter struct {
+	lowest uint64
+	sh uint32
+	rh uint32
+}
+
+// Highest bits:
+// * 1..31  -- value (31 bits)
+// * 32     -- "overflow" bit
+//
+// Lowest bits:
+// * 1      -- "senders" is overflowed
+// * 2..32  -- "senders" value (31 bits)
+// * 33     -- "receivers" is overflowed
+// * 34..64 -- "receivers" value (31 bits)
+//
+//
+// How to fix an overflowed value:
+// 1. Increment {r,s}h -- set the "overflow" bit
+// 2. Fix overflowed {senders,receivers} value via decrementing it by (1 << 32)
+// 3. Increment {r,s}h -- reset the "overflow" bit and increment the highest part atomically
+//
+// How to increment senders/receivers:
+//    We increment only the lowest bits, which can be overflowed.
+//    In this case we have to fix the overflowed value.
+// 1. Read highest bits for both values
+// 2. Atomically increment lowest bits
+// 3. In case of overflowing, we should fix it. We assume that only
+//    one thread can overflow the value and it has to fix this.
+//    Therefore, we can just check if the value is (1 << 32) after the increment.
+// 3. Re-check that highest bits are not changed, fail otherwise.
+
+func (c *SRCounter) IncS() (s uint64, r uint64) {
+	for {
+		// Read the highest parts
+		sh := atomic.LoadUint32(&c.sh)
+		rh := atomic.LoadUint32(&c.rh)
+		// Increment the "senders" lowest part
+		l := atomic.AddUint64(&c.lowest, sendersInc)
+		// Get both "senders" and "receivers" lowest parts
+		sl := l >> sendersOffset
+		rl := l & receiversMask
+		// Check if we do not overflow "senders" lowest part, fix it in this case
+		if sl == (1 << 32) {
+			atomic.StoreUint32(&c.sh, sh + 1)
+			atomic.AddUint64(&c.lowest, -(1 << 32))
+			atomic.StoreUint32(&c.sh, sh + 1)
+		}
+		// Re-check if highest parts are not changed
+		if sh != atomic.LoadUint32(&c.sh) || rh != atomic.LoadUint32(&c.rh) { continue }
+		// Combine lowest and highest parts to get the values
+		if sh % 2 == 0 && sl < overflow { sl += overflow }
+		sh /= 2
+		if rh % 2 == 0 && rl < overflow { rl += overflow }
+		rh /= 2
+		s = uint64(sh) << 32 + sl - 1
+		r = uint64(rh) << 32 + rl
+		return
+	}
+}
+
+func (c *SRCounter) IncR() (s uint64, r uint64) {
+
+}
+
+func (c *SRCounter) ReadS() uint64 {
+	for {
+		sh := atomic.LoadUint32(&c.sh)
+		l := atomic.LoadUint64(&c.lowest)
+		sl := l >> sendersOffset
+		if sh != atomic.LoadUint32(&c.sh) { continue }
+		if sh%2 == 0 && sl < overflow { sl += overflow }
+		sh /= 2
+		return uint64(sh)<<32 + sl
+	}
+}
+
+func (c *SRCounter) IncSUntil(limit uint64) {
+	for ; c.ReadS() < limit ; {
+
+	}
+}
+
+func (c *SRCounter) IncRUntil(limit uint64) {
+
+}
+
+
+
+
 func getSendersAndReceivers(state uint64) (senders uint64, receivers uint64) {
 	senders = state >> sendersOffset
 	receivers = state & receiversMask
