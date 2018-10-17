@@ -8,7 +8,7 @@ import (
 
 func TestSimple(t *testing.T) {
 	// Run sender
-	c := NewLFChan()
+	c := NewLFChan(capacity)
 	go func() {
 		c.SendInt(10)
 	}()
@@ -18,8 +18,8 @@ func TestSimple(t *testing.T) {
 }
 
 func testSimpleSendAndReceiveWithSelect(t *testing.T) {
-	c1 := NewLFChan()
-	dummy := NewLFChan()
+	c1 := NewLFChan(capacity)
+	dummy := NewLFChan(capacity)
 	N := 1000
 	// Run sender
 	go func() {
@@ -50,8 +50,8 @@ func testSimpleSendAndReceiveWithSelect(t *testing.T) {
 }
 
 func testSimpleSelects(t *testing.T) {
-	c1 := NewLFChan()
-	c2 := NewLFChan()
+	c1 := NewLFChan(capacity)
+	c2 := NewLFChan(capacity)
 	N := 1000
 	// Run sender
 	go func() {
@@ -95,7 +95,7 @@ func testSimpleSelects(t *testing.T) {
 func TestStress(t *testing.T) {
 	n := 500000
 	k := 10
-	c := NewLFChan()
+	c := NewLFChan(capacity)
 	wg := sync.WaitGroup{}
 	// Run sender
 	for xxx := 0; xxx < k; xxx++ {
@@ -126,8 +126,8 @@ func TestStress(t *testing.T) {
 func testStressWithSelectOnReceive(t *testing.T) {
 	n := 500000
 	k := 2
-	c := NewLFChan()
-	dummy := NewLFChan()
+	c := NewLFChan(capacity)
+	dummy := NewLFChan(capacity)
 	wg := sync.WaitGroup{}
 	// Run sender
 	for sender := 0; sender < k; sender++ {
@@ -170,8 +170,8 @@ func testStressWithSelectOnReceive(t *testing.T) {
 func testStressSelects(t *testing.T) {
 	n := 500000
 	k := 3
-	c := NewLFChan()
-	dummy := NewLFChan()
+	c := NewLFChan(capacity)
+	dummy := NewLFChan(capacity)
 	wg := sync.WaitGroup{}
 	// Run sender
 	for sender := 0; sender < k; sender++ {
@@ -222,8 +222,8 @@ func testStressSelects(t *testing.T) {
 func testStressBothSendAndReceiveSelect(t *testing.T) {
 	n := 50000
 	k := 1
-	c1 := NewLFChan()
-	c2 := NewLFChan()
+	c1 := NewLFChan(capacity)
+	c2 := NewLFChan(capacity)
 	wg := sync.WaitGroup{}
 	// Run sender
 	//for sender := 0; sender < k; sender++ {
@@ -271,8 +271,8 @@ func testStressBothSendAndReceiveSelect(t *testing.T) {
 }
 
 func testCancellation(t *testing.T) {
-	c := NewLFChan()
-	dummy := NewLFChan()
+	c := NewLFChan(capacity)
+	dummy := NewLFChan(capacity)
 	n := 100000
 	k := 50
 	// Add first element to the dummy channel

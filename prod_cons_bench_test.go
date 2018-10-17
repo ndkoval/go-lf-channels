@@ -11,6 +11,7 @@ import (
 	"runtime/pprof"
 )
 
+const capacity = 0
 const kovalAlgo = true
 const useProfiler = false
 const approxBatchSize = 100000
@@ -19,7 +20,7 @@ var goroutines = []int{0, 10000}
 var work = []int{100}
 
 func BenchmarkN1(b *testing.B) {
-	for _, withSelect := range [2]bool{false, true} {
+	for _, withSelect := range [2]bool{false} {
 		for _, work := range work {
 			for _, parallelism := range parallelism {
 				consumers := 1
@@ -37,7 +38,7 @@ func BenchmarkN1(b *testing.B) {
 }
 
 func BenchmarkNN(b *testing.B) {
-	for _, withSelect := range [2]bool{false, true} {
+	for _, withSelect := range [2]bool{false} {
 		for _, work := range work {
 			for _, goroutines := range goroutines {
 				for _, parallelism := range parallelism {
@@ -89,7 +90,7 @@ func runBenchmark(b *testing.B, producers int, consumers int, parallelism int, w
 func runBenchmarkGo(n int, producers int, consumers int, withSelect bool, work int) {
 	wg := sync.WaitGroup{}
 	wg.Add(producers + consumers)
-	c := make(chan int)
+	c := make(chan int, capacity)
 	// Run producers
 	for i := 0; i < producers; i++ {
 		go func() {
@@ -134,13 +135,13 @@ func runBenchmarkGo(n int, producers int, consumers int, withSelect bool, work i
 func runBenchmarkKoval(n int, producers int, consumers int, withSelect bool, work int) {
 	wg := sync.WaitGroup{}
 	wg.Add(producers + consumers)
-	c := NewLFChan()
+	c := NewLFChan(capacity)
 	// Run producers
 	for i := 0; i < producers; i++ {
 		go func() {
 			defer wg.Done()
 			var dummyChan *LFChan
-			if withSelect { dummyChan = NewLFChan() }
+			if withSelect { dummyChan = NewLFChan(0) }
 			for j := 0; j < n / producers; j++ {
 				if withSelect {
 					Select(
@@ -167,7 +168,7 @@ func runBenchmarkKoval(n int, producers int, consumers int, withSelect bool, wor
 		go func() {
 			defer wg.Done()
 			var dummyChan *LFChan
-			if withSelect { dummyChan = NewLFChan() }
+			if withSelect { dummyChan = NewLFChan(0) }
 			for j := 0; j < n / consumers; j++ {
 				if withSelect {
 					Select(

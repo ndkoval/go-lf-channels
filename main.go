@@ -10,7 +10,7 @@ func main() {
 	CPU := 144
 	n := 100000
 	runtime.GOMAXPROCS(CPU)
-	c := NewLFChan()
+	c := NewLFChan(0)
 	wg := sync.WaitGroup{}
 	wg.Add(CPU)
 	for producer := 0; producer < CPU / 2; producer++ {
