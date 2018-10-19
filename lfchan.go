@@ -66,7 +66,7 @@ func (c *LFChan) tryIncSendersFrom(sendersFrom uint64, receiversFrom uint64) boo
 	res := false
 	c.acquireReadLock()
 	for {
-		h := c.h()
+		h := c.highest
 		l := c.l()
 		s, r := counters(l, h)
 		if s == sendersFrom && r == receiversFrom {
@@ -87,7 +87,7 @@ func (c *LFChan) incSendersFrom(sendersFrom uint64) bool {
 	res := false
 	c.acquireReadLock()
 	for {
-		h := c.h()
+		h := c.highest
 		l := c.l()
 		s, _ := counters(l, h)
 		if s == sendersFrom {
@@ -107,7 +107,7 @@ func (c *LFChan) tryIncReceiversFrom(sendersFrom uint64, receiversFrom uint64) b
 	res := false
 	c.acquireReadLock()
 	for {
-		h := c.h()
+		h := c.highest
 		l := c.l()
 		s, r := counters(l, h)
 		if r == receiversFrom && s == sendersFrom {
@@ -127,7 +127,7 @@ func (c *LFChan) incReceiversFrom(receiversFrom uint64) bool {
 	res := false
 	c.acquireReadLock()
 	for {
-		h := c.h()
+		h := c.highest
 		l := c.l()
 		_, r := counters(l, h)
 		if r == receiversFrom {
@@ -146,18 +146,18 @@ func (c *LFChan) incReceiversFrom(receiversFrom uint64) bool {
 func (c *LFChan) incSendersAndGetSnapshot() (senders uint64, receivers uint64) {
 	c.acquireReadLock()
 	l := atomic.AddUint64(&c.lowest, sendersInc)
-	h := c.h()
+	h := c.highest
 	c.releaseReadLock()
 	if (l >> sendersOffset) >= overflowed {
 		for {
 			if c.tryAcquireWriteLock() {
-				if c.h() == h {
+				if c.highest == h {
 					c.lowest -= overflowed << sendersOffset
 					c.highest = h + 1 // todo hl, hr
 				}
 				c.releaseWriteLock()
 			} else {
-				if c.h() != h { break }
+				if c.highest != h { break }
 			}
 		}
 	}
@@ -167,18 +167,18 @@ func (c *LFChan) incSendersAndGetSnapshot() (senders uint64, receivers uint64) {
 func (c *LFChan) incReceiversAndGetSnapshot() (senders uint64, receivers uint64) {
 	c.acquireReadLock()
 	l := atomic.AddUint64(&c.lowest, receiversInc)
-	h := c.h()
+	h := c.highest
 	c.releaseReadLock()
 	if (l & receiversMask) >= overflowed {
 		for {
 			if c.tryAcquireWriteLock() {
-				if c.h() == h {
+				if c.highest == h {
 					c.lowest -= overflowed
 					c.highest = h + 1
 				}
 				c.releaseWriteLock()
 			} else {
-				if c.h() != h { break }
+				if c.highest != h { break }
 			}
 		}
 	}
