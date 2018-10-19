@@ -16,34 +16,29 @@ const receiversInc = 1
 
 const overflowed = 1 << 31
 
-type SRCounter struct {
-	lowest  uint64
-	highest uint64
-	lock    uint32
-}
 const W_LOCKED = 1 << 30
 
-func (c *SRCounter) h() uint64 { return atomic.LoadUint64(&c.highest) }
-func (c *SRCounter) l() uint64 { return atomic.LoadUint64(&c.lowest) }
+func (c *LFChan) h() uint64 { return atomic.LoadUint64(&c.highest) }
+func (c *LFChan) l() uint64 { return atomic.LoadUint64(&c.lowest) }
 
-func (c *SRCounter) acquireReadLock() {
+func (c *LFChan) acquireReadLock() {
 	lock := atomic.AddUint32(&c.lock, 1)
 	for lock > W_LOCKED {
 		lock = atomic.LoadUint32(&c.lock)
 	}
 }
 
-func (c *SRCounter) releaseReadLock() {
+func (c *LFChan) releaseReadLock() {
 	atomic.AddUint32(&c.lock, ^uint32(0))
 }
 
-func (c *SRCounter) tryAcquireWriteLock() bool {
+func (c *LFChan) tryAcquireWriteLock() bool {
 	lock := c.lock
 	if lock != 0 { return false }
 	return atomic.CompareAndSwapUint32(&c.lock, 0, W_LOCKED)
 }
 
-func (c *SRCounter) releaseWriteLock() {
+func (c *LFChan) releaseWriteLock() {
 	atomic.AddUint32(&c.lock, ^uint32(W_LOCKED - 1))
 }
 
@@ -58,7 +53,7 @@ func counters(lowest uint64, highest uint64) (senders uint64, receivers uint64) 
 	return
 }
 
-func (c *SRCounter) getSnapshot() (senders uint64, receivers uint64) {
+func (c *LFChan) getSnapshot() (senders uint64, receivers uint64) {
 	for {
 		h := c.h()
 		l := c.l()
@@ -67,7 +62,7 @@ func (c *SRCounter) getSnapshot() (senders uint64, receivers uint64) {
 	}
 }
 
-func (c *SRCounter) tryIncSendersFrom(sendersFrom uint64, receiversFrom uint64) bool {
+func (c *LFChan) tryIncSendersFrom(sendersFrom uint64, receiversFrom uint64) bool {
 	res := false
 	c.acquireReadLock()
 	for {
@@ -88,7 +83,7 @@ func (c *SRCounter) tryIncSendersFrom(sendersFrom uint64, receiversFrom uint64) 
 }
 
 
-func (c *SRCounter) incSendersFrom(sendersFrom uint64) bool {
+func (c *LFChan) incSendersFrom(sendersFrom uint64) bool {
 	res := false
 	c.acquireReadLock()
 	for {
@@ -108,7 +103,7 @@ func (c *SRCounter) incSendersFrom(sendersFrom uint64) bool {
 	return res
 }
 
-func (c *SRCounter) tryIncReceiversFrom(sendersFrom uint64, receiversFrom uint64) bool {
+func (c *LFChan) tryIncReceiversFrom(sendersFrom uint64, receiversFrom uint64) bool {
 	res := false
 	c.acquireReadLock()
 	for {
@@ -128,7 +123,7 @@ func (c *SRCounter) tryIncReceiversFrom(sendersFrom uint64, receiversFrom uint64
 	return res
 }
 
-func (c *SRCounter) incReceiversFrom(receiversFrom uint64) bool {
+func (c *LFChan) incReceiversFrom(receiversFrom uint64) bool {
 	res := false
 	c.acquireReadLock()
 	for {
@@ -148,7 +143,7 @@ func (c *SRCounter) incReceiversFrom(receiversFrom uint64) bool {
 	return res
 }
 
-func (c *SRCounter) incSendersAndGetSnapshot() (senders uint64, receivers uint64) {
+func (c *LFChan) incSendersAndGetSnapshot() (senders uint64, receivers uint64) {
 	c.acquireReadLock()
 	l := atomic.AddUint64(&c.lowest, sendersInc)
 	h := c.h()
@@ -169,7 +164,7 @@ func (c *SRCounter) incSendersAndGetSnapshot() (senders uint64, receivers uint64
 	return counters(l, h)
 }
 
-func (c *SRCounter) incReceiversAndGetSnapshot() (senders uint64, receivers uint64) {
+func (c *LFChan) incReceiversAndGetSnapshot() (senders uint64, receivers uint64) {
 	c.acquireReadLock()
 	l := atomic.AddUint64(&c.lowest, receiversInc)
 	h := c.h()
@@ -193,7 +188,9 @@ func (c *SRCounter) incReceiversAndGetSnapshot() (senders uint64, receivers uint
 
 type LFChan struct {
 	capacity uint64
-	counter SRCounter
+	lock    uint32
+	lowest  uint64
+	highest uint64
 
 	_head unsafe.Pointer
 	_tail unsafe.Pointer
@@ -271,7 +268,7 @@ func (c *LFChan) Send(element unsafe.Pointer) {
 	try_again: for { // CAS-loop
 		head := c.head()
 		tail := c.tail()
-		senders, receivers := c.counter.incSendersAndGetSnapshot()
+		senders, receivers := c.incSendersAndGetSnapshot()
 		if senders <= receivers {
 			deqIdx := senders
 			head = c.getHead(nodeId(deqIdx), head)
@@ -315,7 +312,7 @@ func (c *LFChan) Receive() unsafe.Pointer {
 	try_again: for { // CAS-loop
 		head := c.head()
 		tail := c.tail()
-		senders, receivers := c.counter.incReceiversAndGetSnapshot()
+		senders, receivers := c.incReceiversAndGetSnapshot()
 		if receivers <= senders {
 			deqIdx := receivers
 			head = c.getHead(nodeId(deqIdx), head)
@@ -453,7 +450,7 @@ func (c *LFChan) regSelectForSend(selectInstance *SelectInstance, element unsafe
 	try_again: for { // CAS-loop
 		head := c.head()
 		tail := c.tail()
-		senders, receivers := c.counter.getSnapshot()
+		senders, receivers := c.getSnapshot()
 		if (senders + 1) <= receivers {
 			deqIdx := senders + 1
 			head = c.getHead(nodeId(deqIdx), head)
@@ -465,7 +462,7 @@ func (c *LFChan) regSelectForSend(selectInstance *SelectInstance, element unsafe
 			for {
 				descCont, isDescContSelectInstance = head.readContinuation(i)
 				if descCont == takenContinuation {
-					c.counter.incSendersFrom(senders)
+					c.incSendersFrom(senders)
 					continue try_again
 				}
 				desc = &SelectDesc {
@@ -482,14 +479,14 @@ func (c *LFChan) regSelectForSend(selectInstance *SelectInstance, element unsafe
 			} else {
 				if !selectInstance.isSelected() {
 					head.setContinuation(i, takenContinuation)
-					c.counter.incSendersFrom(senders)
+					c.incSendersFrom(senders)
 					continue try_again
 				}
 				head.casContinuation(i, unsafe.Pointer(desc), desc.cont)
 				return false, RegInfo{}
 			}
 			// Move deque index forward
-			c.counter.incSendersFrom(senders)
+			c.incSendersFrom(senders)
 			// Resume all continuations
 			var anotherG unsafe.Pointer
 			if isDescContSelectInstance {
@@ -503,7 +500,7 @@ func (c *LFChan) regSelectForSend(selectInstance *SelectInstance, element unsafe
 			runtime.UnparkUnsafe(selectInstance.gp)
 			return false, RegInfo{}
 		} else {
-			if !c.counter.tryIncSendersFrom(senders, receivers) { continue try_again }
+			if !c.tryIncSendersFrom(senders, receivers) { continue try_again }
 			enqIdx := senders + 1
 			tail := c.getTail(nodeId(enqIdx), tail)
 			i := indexInNode(enqIdx)
@@ -520,7 +517,7 @@ func (c *LFChan) regSelectForReceive(selectInstance *SelectInstance) (added bool
 	try_again: for { // CAS-loop
 		head := c.head()
 		tail := c.tail()
-		senders, receivers := c.counter.getSnapshot()
+		senders, receivers := c.getSnapshot()
 		if (receivers + 1) <= senders {
 			deqIdx := receivers + 1
 			head = c.getHead(nodeId(deqIdx), head)
@@ -532,7 +529,7 @@ func (c *LFChan) regSelectForReceive(selectInstance *SelectInstance) (added bool
 			for {
 				descCont, isDescContSelectInstance = head.readContinuation(i)
 				if descCont == takenContinuation {
-					c.counter.incReceiversFrom(receivers)
+					c.incReceiversFrom(receivers)
 					continue try_again
 				}
 				desc = &SelectDesc {
@@ -549,14 +546,14 @@ func (c *LFChan) regSelectForReceive(selectInstance *SelectInstance) (added bool
 			} else {
 				if !selectInstance.isSelected() {
 					head.setContinuation(i, takenContinuation)
-					c.counter.incReceiversFrom(receivers)
+					c.incReceiversFrom(receivers)
 					continue try_again
 				}
 				head.casContinuation(i, unsafe.Pointer(desc), desc.cont)
 				return false, RegInfo{}
 			}
 			// Move deque index forward
-			c.counter.incReceiversFrom(receivers)
+			c.incReceiversFrom(receivers)
 			// Resume all continuations
 
 			if isElement(descCont) {
@@ -577,7 +574,7 @@ func (c *LFChan) regSelectForReceive(selectInstance *SelectInstance) (added bool
 			runtime.UnparkUnsafe(selectInstance.gp)
 			return false, RegInfo{}
 		} else {
-			if !c.counter.tryIncReceiversFrom(senders, receivers) { continue try_again }
+			if !c.tryIncReceiversFrom(senders, receivers) { continue try_again }
 			enqIdx := receivers + 1
 			tail := c.getTail(nodeId(enqIdx), tail)
 			i := indexInNode(enqIdx)
