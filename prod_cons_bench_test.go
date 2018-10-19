@@ -20,7 +20,7 @@ var goroutines = []int{0, 10000}
 var work = []int{100}
 
 func BenchmarkN1(b *testing.B) {
-	for _, withSelect := range [2]bool{false} {
+	for _, withSelect := range [2]bool{false, true} {
 		for _, work := range work {
 			for _, parallelism := range parallelism {
 				consumers := 1
@@ -38,7 +38,7 @@ func BenchmarkN1(b *testing.B) {
 }
 
 func BenchmarkNN(b *testing.B) {
-	for _, withSelect := range [2]bool{false} {
+	for _, withSelect := range [2]bool{false, true} {
 		for _, work := range work {
 			for _, goroutines := range goroutines {
 				for _, parallelism := range parallelism {

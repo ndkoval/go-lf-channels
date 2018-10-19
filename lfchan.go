@@ -67,23 +67,85 @@ func (c *SRCounter) getSnapshot() (senders uint64, receivers uint64) {
 	}
 }
 
-func (c *SRCounter) incSendersUntil(limit uint64) {
-	curS, _ := c.getSnapshot()
-	if curS >= limit { return }
-	if limit - curS <= uint64(segmentSize) {
-		c.acquireReadLock()
-		curS, _ := c.getSnapshot()
-		if (curS < limit) {
-
+func (c *SRCounter) tryIncSendersFrom(sendersFrom uint64, receiversFrom uint64) bool {
+	res := false
+	c.acquireReadLock()
+	for {
+		h := c.h()
+		l := c.l()
+		s, r := counters(l, h)
+		if s == sendersFrom && r == receiversFrom {
+			if atomic.CompareAndSwapUint64(&c.lowest, l, l + sendersInc) {
+				res = true
+				break
+			}
+		} else {
+			break
 		}
-		c.releaseReadLock()
-	} else {
-
 	}
+	c.releaseReadLock()
+	return res
 }
 
-func (c *SRCounter) incReceiversUntil(limit uint64) {
 
+func (c *SRCounter) incSendersFrom(sendersFrom uint64) bool {
+	res := false
+	c.acquireReadLock()
+	for {
+		h := c.h()
+		l := c.l()
+		s, _ := counters(l, h)
+		if s == sendersFrom {
+			if atomic.CompareAndSwapUint64(&c.lowest, l, l + sendersInc) {
+				res = true
+				break
+			}
+		} else {
+			break
+		}
+	}
+	c.releaseReadLock()
+	return res
+}
+
+func (c *SRCounter) tryIncReceiversFrom(sendersFrom uint64, receiversFrom uint64) bool {
+	res := false
+	c.acquireReadLock()
+	for {
+		h := c.h()
+		l := c.l()
+		s, r := counters(l, h)
+		if r == receiversFrom && s == sendersFrom {
+			if atomic.CompareAndSwapUint64(&c.lowest, l, l + receiversInc) {
+				res = true
+				break
+			}
+		} else {
+			break
+		}
+	}
+	c.releaseReadLock()
+	return res
+}
+
+func (c *SRCounter) incReceiversFrom(receiversFrom uint64) bool {
+	res := false
+	c.acquireReadLock()
+	for {
+		h := c.h()
+		l := c.l()
+		_, r := counters(l, h)
+		if r == receiversFrom {
+			if atomic.CompareAndSwapUint64(&c.lowest, l, l + receiversInc) {
+				res = true
+				break
+			}
+		} else {
+			break
+		}
+	}
+	c.releaseReadLock()
+	return res
 }
 
 func (c *SRCounter) incSendersAndGetSnapshot() (senders uint64, receivers uint64) {
@@ -198,14 +260,12 @@ const SUCCEEDED = 1
 const FAILED = 2
 
 var takenContinuation = (unsafe.Pointer) ((uintptr) (1))
-var takenElement = (unsafe.Pointer) ((uintptr) (2))
 var ReceiverElement = (unsafe.Pointer) ((uintptr) (4096))
 const segmentSizeShift = uint32(6)
 const segmentSize = uint32(1 << segmentSizeShift)
 const segmentIndexMask = uint64(segmentSize - 1)
 
 var selectIdGen int64 = 0
-
 
 func (c *LFChan) Send(element unsafe.Pointer) {
 	try_again: for { // CAS-loop
@@ -216,20 +276,8 @@ func (c *LFChan) Send(element unsafe.Pointer) {
 			deqIdx := senders
 			head = c.getHead(nodeId(deqIdx), head)
 			i := indexInNode(deqIdx)
-			var cont unsafe.Pointer
-			var isSelectInstance bool
-			for {
-				cont, isSelectInstance = head.readContinuation(i, element)
-				if cont == element {
-					return // done
-				}
-				if cont == takenContinuation {
-					continue try_again
-				}
-				if head.casContinuation(i, cont, takenContinuation) {
-					break
-				}
-			}
+			cont, isSelectInstance := head.readContinuation(i)
+			if cont == takenContinuation { continue try_again }
 			if isSelectInstance {
 				selectInstance := (*SelectInstance) (cont)
 				if !selectInstance.trySetDescriptor(unsafe.Pointer(c)) {
@@ -248,16 +296,16 @@ func (c *LFChan) Send(element unsafe.Pointer) {
 			i := indexInNode(enqIdx)
 			if senders - receivers <= c.capacity {
 				// buffering
-				if atomic.CompareAndSwapPointer(&tail.data[i], nil, element) { return }
+				if atomic.CompareAndSwapPointer(&tail.data[i], nil, element) {
+					return
+				} else { continue try_again }
 			} else {
 				curG := runtime.GetGoroutine()
 				runtime.SetGParam(curG, element)
 				if atomic.CompareAndSwapPointer(&tail.data[i], nil, curG) {
 					runtime.ParkUnsafe()
 					return
-				} else {
-					runtime.SetGParam(curG, nil)
-				}
+				} else { continue try_again }
 			}
 		}
 	}
@@ -275,7 +323,7 @@ func (c *LFChan) Receive() unsafe.Pointer {
 			var cont unsafe.Pointer
 			var isSelectInstance bool
 			for {
-				cont, isSelectInstance = head.readContinuation(i, takenContinuation)
+				cont, isSelectInstance = head.readContinuation(i)
 				if cont == takenContinuation {
 					continue try_again
 				}
@@ -291,6 +339,8 @@ func (c *LFChan) Receive() unsafe.Pointer {
 				runtime.UnparkUnsafe(selectInstance.gp)
 				return nil // todo find it
 			} else {
+				if isElement(cont) { return cont }
+
 				res := runtime.GetGParam(cont)
 				runtime.SetGParam(cont, nil)
 				runtime.UnparkUnsafe(cont)
@@ -304,8 +354,9 @@ func (c *LFChan) Receive() unsafe.Pointer {
 			if atomic.CompareAndSwapPointer(&tail.data[i], nil, curG) {
 				return parkAndThenReturn()
 			} else {
+				continue try_again
 				res := atomic.LoadPointer(&tail.data[i])
-				if res == takenElement { continue try_again }
+				if res == takenContinuation { continue try_again }
 				tail.data[i] = takenContinuation
 				return res
 			}
@@ -354,37 +405,19 @@ func ConsumeCPU(tokens int) {
 	if t == 42 { atomic.StoreInt32(&consumedCPU, consumedCPU + int32(t)) }
 }
 
-// Tries to read an element from the specified node
-// at the specified index. Returns this element or
-// marks the slot as broken (sets `TAKEN_ELEMENT` to the slot)
-// and returns `TAKEN_ELEMENT` if the element is unavailable.
-func (n *node) readElement(index uint32) unsafe.Pointer {
-	// Element index in `Node#data` array
-	// Spin wait on the slot
-	elementAddr := &n.data[index * 2]
-	element := atomic.LoadPointer(elementAddr) // volatile read
-	if element != nil {
-		return element
-	}
-	// Cannot spin forever, mark the slot as broken if it is still unavailable
-	if atomic.CompareAndSwapPointer(elementAddr, nil, takenElement) {
-		return takenElement
-	} else {
-		// The element is set, read it and return
-		return n.data[index * 2]
-	}
-}
-
-func (n *node) readContinuation(i uint32, element unsafe.Pointer) (cont unsafe.Pointer, isSelectInstance bool) {
+func (n *node) readContinuation(i uint32) (cont unsafe.Pointer, isSelectInstance bool) {
 	for {
 		cont := atomic.LoadPointer(&n.data[i])
 		if cont == nil {
-			if atomic.CompareAndSwapPointer(&n.data[i], nil, element) {
-				return element, false
+			if atomic.CompareAndSwapPointer(&n.data[i], nil, takenContinuation) {
+				return takenContinuation, false
 			} else { continue }
 		}
 		if cont == takenContinuation {
 			return takenContinuation, false
+		}
+		if isElement(cont) {
+			return cont, false
 		}
 		contType := IntType(cont)
 		switch contType {
@@ -425,19 +458,14 @@ func (c *LFChan) regSelectForSend(selectInstance *SelectInstance, element unsafe
 			deqIdx := senders + 1
 			head = c.getHead(nodeId(deqIdx), head)
 			i := indexInNode(deqIdx)
-			el := head.readElement(i)
-			if el == takenElement {
-				c.counter.incSendersUntil(receivers + 1)
-				continue try_again
-			}
 			// Set descriptor at first
 			var desc *SelectDesc
 			var descCont unsafe.Pointer
 			var isDescContSelectInstance bool
 			for {
-				descCont, isDescContSelectInstance = head.readContinuation(i, takenContinuation)
+				descCont, isDescContSelectInstance = head.readContinuation(i)
 				if descCont == takenContinuation {
-					c.counter.incSendersUntil(receivers + 1)
+					c.counter.incSendersFrom(senders)
 					continue try_again
 				}
 				desc = &SelectDesc {
@@ -454,14 +482,14 @@ func (c *LFChan) regSelectForSend(selectInstance *SelectInstance, element unsafe
 			} else {
 				if !selectInstance.isSelected() {
 					head.setContinuation(i, takenContinuation)
-					c.counter.incSendersUntil(receivers + 1)
+					c.counter.incSendersFrom(senders)
 					continue try_again
 				}
 				head.casContinuation(i, unsafe.Pointer(desc), desc.cont)
 				return false, RegInfo{}
 			}
 			// Move deque index forward
-			c.counter.incSendersUntil(receivers + 1)
+			c.counter.incSendersFrom(senders)
 			// Resume all continuations
 			var anotherG unsafe.Pointer
 			if isDescContSelectInstance {
@@ -471,19 +499,15 @@ func (c *LFChan) regSelectForSend(selectInstance *SelectInstance, element unsafe
 			}
 			runtime.SetGParam(anotherG, element)
 			runtime.UnparkUnsafe(anotherG)
-			runtime.SetGParam(selectInstance.gp, el)
+			runtime.SetGParam(selectInstance.gp, nil)
 			runtime.UnparkUnsafe(selectInstance.gp)
 			return false, RegInfo{}
 		} else {
-			//newSenderAndReceivers := (senders + 1) << sendersOffset + receivers
-			//if !atomic.CompareAndSwapUint64(&c.state, sendersAndReceivers, newSenderAndReceivers) {
-			//	continue try_again
-			//}
+			if !c.counter.tryIncSendersFrom(senders, receivers) { continue try_again }
 			enqIdx := senders + 1
 			tail := c.getTail(nodeId(enqIdx), tail)
 			i := indexInNode(enqIdx)
-			tail.data[i * 2 + 1] = unsafe.Pointer(selectInstance)
-			if atomic.CompareAndSwapPointer(&tail.data[i * 2], nil, element) {
+			if atomic.CompareAndSwapPointer(&tail.data[i], nil, unsafe.Pointer(selectInstance)) {
 				return true, RegInfo{ tail, i }
 			} else {
 				continue try_again
@@ -501,19 +525,14 @@ func (c *LFChan) regSelectForReceive(selectInstance *SelectInstance) (added bool
 			deqIdx := receivers + 1
 			head = c.getHead(nodeId(deqIdx), head)
 			i := indexInNode(deqIdx)
-			el := head.readElement(i)
-			if el == takenElement {
-				c.counter.incReceiversUntil(receivers + 1)
-				continue try_again
-			}
 			// Set descriptor at first
 			var desc *SelectDesc
 			var descCont unsafe.Pointer
 			var isDescContSelectInstance bool
 			for {
-				descCont, isDescContSelectInstance = head.readContinuation(i, takenContinuation)
+				descCont, isDescContSelectInstance = head.readContinuation(i)
 				if descCont == takenContinuation {
-					c.counter.incReceiversUntil(receivers + 1)
+					c.counter.incReceiversFrom(receivers)
 					continue try_again
 				}
 				desc = &SelectDesc {
@@ -530,15 +549,22 @@ func (c *LFChan) regSelectForReceive(selectInstance *SelectInstance) (added bool
 			} else {
 				if !selectInstance.isSelected() {
 					head.setContinuation(i, takenContinuation)
-					c.counter.incReceiversUntil(receivers + 1)
+					c.counter.incReceiversFrom(receivers)
 					continue try_again
 				}
 				head.casContinuation(i, unsafe.Pointer(desc), desc.cont)
 				return false, RegInfo{}
 			}
 			// Move deque index forward
-			c.counter.incReceiversUntil(receivers + 1)
+			c.counter.incReceiversFrom(receivers)
 			// Resume all continuations
+
+			if isElement(descCont) {
+				runtime.SetGParam(selectInstance.gp, nil) // TODO element
+				runtime.UnparkUnsafe(selectInstance.gp)
+				return false, RegInfo{}
+			}
+
 			var anotherG unsafe.Pointer
 			if isDescContSelectInstance {
 				anotherG = ((*SelectInstance) (descCont)).gp
@@ -547,19 +573,15 @@ func (c *LFChan) regSelectForReceive(selectInstance *SelectInstance) (added bool
 			}
 			runtime.SetGParam(anotherG, ReceiverElement)
 			runtime.UnparkUnsafe(anotherG)
-			runtime.SetGParam(selectInstance.gp, el)
+			runtime.SetGParam(selectInstance.gp, nil) // TODO element
 			runtime.UnparkUnsafe(selectInstance.gp)
 			return false, RegInfo{}
 		} else {
-			//newSenderAndReceivers := senders << sendersOffset + (receivers + 1)
-			//if !atomic.CompareAndSwapUint64(&c.state, sendersAndReceivers, newSenderAndReceivers) {
-			//	continue try_again
-			//}
+			if !c.counter.tryIncReceiversFrom(senders, receivers) { continue try_again }
 			enqIdx := receivers + 1
 			tail := c.getTail(nodeId(enqIdx), tail)
 			i := indexInNode(enqIdx)
-			tail.data[i * 2 + 1] = unsafe.Pointer(selectInstance)
-			if atomic.CompareAndSwapPointer(&tail.data[i * 2], nil, ReceiverElement) {
+			if atomic.CompareAndSwapPointer(&tail.data[i], nil, unsafe.Pointer(selectInstance)) {
 				return true, RegInfo{ tail, i }
 			} else {
 				continue try_again
@@ -575,7 +597,8 @@ func (sd *SelectDesc) invoke() bool {
 	// help for others if needed.
 	selectInstance := sd.selectInstance
 	anotherCont := sd.cont
-	anotherContType := IntType(anotherCont)
+	anotherContType := int32(-1)
+	if !isElement(anotherCont) { anotherContType = IntType(anotherCont) }
 	sdp := unsafe.Pointer(sd)
 	failed := false
 	if anotherContType == SelectInstanceType {
@@ -745,10 +768,9 @@ func (s *SelectInstance) cancelNonSelectedAlternatives() {
 // ==== CLEANING ====
 
 func clean(node *node, index uint32) {
-	cont, _ := node.readContinuation(index, takenContinuation)
+	cont, _ := node.readContinuation(index)
 	if cont == takenContinuation { return }
 	if !node.casContinuation(index, cont, takenContinuation) { return }
-	atomic.StorePointer(&node.data[index * 2], takenElement)
 	if atomic.AddUint32(&node._cleaned, 1) < segmentSize { return }
 	// Remove the node
 	node.remove()
@@ -884,4 +906,8 @@ func (n *node) casContinuation(index uint32, old, new unsafe.Pointer) bool {
 
 func (n *node) setContinuation(index uint32, cont unsafe.Pointer) {
 	atomic.StorePointer(&n.data[index], cont)
+}
+
+func isElement(cont unsafe.Pointer) bool {
+	return uintptr(cont) < 0xc000000000
 }
