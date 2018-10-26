@@ -1,24 +1,28 @@
 package main
 
 import (
-	"testing"
-	"sync"
 	"fmt"
-	"runtime"
-	"unsafe"
-	"os"
 	"log"
+	"os"
+	"runtime"
 	"runtime/pprof"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+	"unsafe"
 )
 
 const capacity = 0
-const kovalAlgo = true
+const newAlgo = true
 const useProfiler = false
 const approxBatchSize = 100000
-var parallelism = []int{1, 2, 4, 8, 16, 32, 64, 128, 144}
-var goroutines = []int{0, 10000}
-var work = []int{100}
 
+var parallelism = []int{1, 2, 4, 8, 16, 32, 64, 128, 144} // number of scheduler threads
+var goroutines = []int{0, 10000} // 0 -- number of scheduler threads
+var work = []int{100} // an additional work size (parameter for `consumeCPU`) for each operation
+
+// Multiple producer single consumer
 func BenchmarkN1(b *testing.B) {
 	for _, withSelect := range [2]bool{false, true} {
 		for _, work := range work {
@@ -37,6 +41,7 @@ func BenchmarkN1(b *testing.B) {
 	}
 }
 
+// Multiple producer multiple consumer
 func BenchmarkNN(b *testing.B) {
 	for _, withSelect := range [2]bool{false, true} {
 		for _, work := range work {
@@ -78,7 +83,7 @@ func runBenchmark(b *testing.B, producers int, consumers int, parallelism int, w
 		func(b *testing.B) {
 			runtime.GOMAXPROCS(parallelism)
 			b.N = n
-			if kovalAlgo {
+			if newAlgo {
 				runBenchmarkKoval(n, producers, consumers, withSelect, work)
 			} else {
 				runBenchmarkGo(n, producers, consumers, withSelect, work)
@@ -191,4 +196,13 @@ func runBenchmarkKoval(n int, producers int, consumers int, withSelect bool, wor
 		}()
 	}
 	wg.Wait()
+}
+
+var consumedCPU = int32(time.Now().Unix())
+func ConsumeCPU(tokens int) {
+	t := int(atomic.LoadInt32(&consumedCPU)) // volatile read
+	for i := tokens; i > 0; i-- {
+		t += (t * 0x5DEECE66D + 0xB + i) & (0xFFFFFFFFFFFF)
+	}
+	if t == 42 { atomic.StoreInt32(&consumedCPU, consumedCPU + int32(t)) }
 }
