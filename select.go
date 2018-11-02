@@ -54,35 +54,56 @@ func (s *SelectInstance) doSelect() {
 	alternative.action(result)
 }
 
-func (s *SelectInstance) trySetState(channel unsafe.Pointer, insideRegistration bool) bool {
+func (s *SelectInstance) trySetState(channel unsafe.Pointer, insideRegistration bool) (bool, bool) {
 	state := s.getState()
 	if insideRegistration {
-		if state != state_registering {
-			panic("Invalid state in registration phase")
+		atomic.StorePointer(&s.state, channel)
+		return true, false
+	} else {
+		if state == state_registering {
+			if s.casState(state_registering, channel) {
+				i := 0
+				for {
+					state = s.getState()
+					if state != channel { break }
+					i++
+					if i % 64 == 0 { runtime.Gosched() }
+				}
+				if state == state_finished { return true, true }
+			} else {
+				state = s.getState()
+			}
 		}
-		s.state = channel
-		return true
+		if state != state_waiting { return false, false }
+		return s.casState(state_waiting, channel), false
 	}
-	for state == state_registering {
-		runtime.Gosched()
-		state = s.getState()
-	}
-	if state != state_waiting { return false }
-	return s.casState(state_waiting, channel)
 }
 
 func (s *SelectInstance) selectAlternative() (result unsafe.Pointer, alternative SelectAlternative) {
 	selected := false
 	for _, alt := range *(s.alternatives) {
+		if s.getState() != state_registering {
+			channel := (*LFChan) (s.state)
+			atomic.StorePointer(&s.state, state_finished)
+			for s.getState() != state_finished2 { }
+			result = runtime.GetGParam(s.gp)
+			alternative = s.findAlternative(channel)
+			return
+		}
 		added, regInfo := alt.channel.regSelect(s, alt.element)
 		if added {
 			c := make([]RegInfo, len(*s.regInfos))
 			copy(c, *s.regInfos)
 			c = append(c, regInfo)
 			s.regInfos = &c
-		} else { selected = true; break }
+		} else {
+			selected = true
+			break
+		}
 	}
-	if !selected { atomic.StorePointer(&s.state, state_waiting) }
+	if !selected {
+		atomic.StorePointer(&s.state, state_waiting)
+	}
 	runtime.ParkUnsafe()
 	result = runtime.GetGParam(s.gp)
 	channel := (*LFChan) (s.state)
@@ -126,6 +147,8 @@ type SelectInstance struct {
 }
 var state_registering = unsafe.Pointer(nil)
 var state_waiting = unsafe.Pointer(uintptr(1))
+var state_finished = unsafe.Pointer(uintptr(2))
+var state_finished2 = unsafe.Pointer(uintptr(2))
 
 type RegInfo struct {
 	segment *segment

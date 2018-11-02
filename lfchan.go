@@ -107,12 +107,15 @@ func (c *LFChan) tryResume(head *segment, deqIdx uint64, element unsafe.Pointer)
 
 	if IntType(cont) == SelectInstanceType {
 		selectInstance := (*SelectInstance) (cont)
-		if !selectInstance.trySetState(unsafe.Pointer(c), false) {
-			return fail
-		}
+		selected, non_suspended := selectInstance.trySetState(unsafe.Pointer(c), false)
+		if !selected { return fail }
 		result := selectInstance.findAlternative(c).element
 		runtime.SetGParam(selectInstance.gp, element)
-		runtime.UnparkUnsafe(selectInstance.gp)
+		if non_suspended {
+			selectInstance.trySetState(state_finished2, true)
+		} else {
+			runtime.UnparkUnsafe(selectInstance.gp)
+		}
 		return result
 	} else {
 		runtime.SetGParam(cont, element)
