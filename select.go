@@ -4,6 +4,7 @@ import (
 	"math/rand"
 	"runtime"
 	"sync/atomic"
+	"time"
 	"unsafe"
 )
 
@@ -54,21 +55,19 @@ func (s *SelectInstance) doSelect() {
 	alternative.action(result)
 }
 
-func (s *SelectInstance) trySetState(desc unsafe.Pointer) bool {
-	for {
-		state := s.readState(desc)
-		if state == desc { return true }
-		if state != nil { return false }
-		if s.casState(nil, desc) { return true }
+func (s *SelectInstance) trySetState(channel unsafe.Pointer, insideRegistration bool) bool {
+	state := s.getState()
+	if insideRegistration {
+		if state != state_registering { panic("Invalid state in registration phase") }
+		s.state = channel
+		return true
 	}
+	for state == state_registering { time.Sleep(1); state = s.getState() }
+	if state != state_waiting { return false }
+	return s.casState(state_waiting, channel)
 }
 
-
-func (s *SelectInstance) isSelected() bool {
-	return s.readState(nil) != nil
-}
-
-func (s *SelectInstance) selectAlternative() (unsafe.Pointer, SelectAlternative) {
+func (s *SelectInstance) selectAlternative() (result unsafe.Pointer, alternative SelectAlternative) {
 	for _, alt := range *(s.alternatives) {
 		added, regInfo := alt.channel.regSelect(s, alt.element)
 		if added {
@@ -76,20 +75,14 @@ func (s *SelectInstance) selectAlternative() (unsafe.Pointer, SelectAlternative)
 			copy(c, *s.regInfos)
 			c = append(c, regInfo)
 			s.regInfos = &c
-		}
-		if s.isSelected() { break }
+		} else { break }
 	}
+	if s.state == state_registering { atomic.StorePointer(&s.state, state_waiting) }
 	runtime.ParkUnsafe()
-	result := runtime.GetGParam(s.gp)
-	selectState := s.state
-	var channel *LFChan
-	if IntType(selectState) == SelectDescType {
-		channel = (*LFChan) ((*SelectDesc) (selectState).channel)
-	} else {
-		channel = (*LFChan) (selectState)
-	}
-	alternative := s.findAlternative(channel)
-	return result, alternative
+	result = runtime.GetGParam(s.gp)
+	channel := (*LFChan) (s.state)
+	alternative = s.findAlternative(channel)
+	return
 }
 
 /**
@@ -103,97 +96,18 @@ func (s *SelectInstance) findAlternative(channel *LFChan) SelectAlternative {
 			return alt
 		}
 	}
-	stateType := IntType(s.state)
-	switch stateType {
-	case SelectInstanceType: panic("Impossible: SelectInstance")
-	case SelectDescType: panic("Impossible: SelectDesc")
-	}
 	panic("Impossible")
 }
 
 func (s *SelectInstance) cancelNonSelectedAlternatives() {
 	for _, ri := range *s.regInfos {
-		clean(ri.node, ri.index)
-	}
-}
-
-func (s *SelectInstance) resetState(desc unsafe.Pointer) {
-	s.casState(desc, nil)
-}
-
-
-func (s *SelectInstance) readState(allowedUnprocessedDesc unsafe.Pointer) unsafe.Pointer {
-	for {
-		// Read state
-		state := s.getState()
-		// Check if state is `nil` or `*LFChan` and return it in this case
-		if state == nil || state == allowedUnprocessedDesc {
-			return state
-		}
-		stateType := IntType(state)
-		if stateType != SelectDescType {
-			return state
-		}
-		// If this SelectDesc is allowed return it
-		// State is SelectDesc, help it
-		desc := (*SelectDesc) (state)
-		// Try to help with the found descriptor processing
-		// and update state
-		if desc.invoke() {
-			return state
-		} else {
-			if s.casState(state, nil) { return nil }
-		}
+		ri.segment.clean(ri.index)
 	}
 }
 
 var _nextSelectInstanceId uint64 = 0
 func nextSelectInstanceId() uint64 {
 	return atomic.AddUint64(&_nextSelectInstanceId, 1)
-}
-
-func (sd *SelectDesc) invoke() bool {
-	curStatus := sd.getStatus()
-	if curStatus != UNDECIDED { return curStatus == SUCCEEDED }
-	// Phase 1 -- set descriptor to the select's state,
-	// help for others if needed.
-	selectInstance := sd.selectInstance
-	anotherCont := sd.cont
-	anotherContType := int32(-1)
-	if !isElement(anotherCont) { anotherContType = IntType(anotherCont) }
-	sdp := unsafe.Pointer(sd)
-	failed := false
-	if anotherContType == SelectInstanceType {
-		anotherSelectInstance := (*SelectInstance) (anotherCont)
-		if selectInstance.id < anotherSelectInstance.id {
-			if selectInstance.trySetState(sdp) {
-				if !anotherSelectInstance.trySetState(sdp) {
-					failed = true
-					selectInstance.resetState(sdp)
-				}
-			} else { failed = true }
-		} else {
-			if anotherSelectInstance.trySetState(sdp) {
-				if !selectInstance.trySetState(sdp) {
-					failed = true
-					anotherSelectInstance.resetState(sdp)
-				}
-			} else { failed = true }
-		}
-	} else {
-		if !selectInstance.trySetState(sdp) {
-			sd.setStatus(FAILED)
-			return false
-		}
-	}
-	// Phase 3 -- update descriptor's and selectInstance statuses
-	if failed {
-		sd.setStatus(FAILED)
-		return false
-	} else {
-		sd.setStatus(SUCCEEDED)
-		return true
-	}
 }
 
 const SelectInstanceType int32 = 1298498092
@@ -205,20 +119,10 @@ type SelectInstance struct {
 	state 	     unsafe.Pointer
 	gp           unsafe.Pointer // goroutine
 }
+var state_registering = unsafe.Pointer(nil)
+var state_waiting = unsafe.Pointer(uintptr(1))
 
 type RegInfo struct {
-	node  *segment
-	index uint32
+	segment *segment
+	index   uint32
 }
-
-const SelectDescType int32 = 2019727883
-type SelectDesc struct {
-	__type 	       int32
-	channel        *LFChan
-	selectInstance *SelectInstance
-	cont 		   unsafe.Pointer // either *SelectInstance or *g
-	status 		   int32 // 0 -- UNDECIDED, 1 -- SUCCESS, 2 -- FAIL
-}
-const UNDECIDED = 0
-const SUCCEEDED = 1
-const FAILED = 2

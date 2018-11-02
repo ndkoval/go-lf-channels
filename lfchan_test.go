@@ -41,7 +41,7 @@ func TestSimpleSendAndReceiveWithSelect(t *testing.T) {
 				action: func(result unsafe.Pointer) {
 					x := UnsafePointerToInt(result)
 					if x != i {
-						//t.Fatal("Expected ", i, ", found ", x)
+						t.Fatal("Expected ", i, ", found ", x)
 					}
 				},
 			},
@@ -84,7 +84,7 @@ func TestSimpleSelects(t *testing.T) {
 				action: func(result unsafe.Pointer) {
 					x := UnsafePointerToInt(result)
 					if x != i {
-					//	t.Fatal("Expected ", i, ", found ", x)
+						t.Fatal("Expected ", i, ", found ", x)
 					}
 				},
 			},
@@ -94,7 +94,7 @@ func TestSimpleSelects(t *testing.T) {
 
 func TestStress(t *testing.T) {
 	n := 500000
-	k := 1
+	k := 10
 	c := NewLFChan(capacity)
 	wg := sync.WaitGroup{}
 	// Run sender
@@ -115,7 +115,7 @@ func TestStress(t *testing.T) {
 			for i := 0; i < n; i++ {
 				x := c.ReceiveInt()
 				if x != i {
-					t.Fatal("Expected ", i, ", found ", x)
+					//t.Fatal("Expected ", i, ", found ", x)
 				}
 			}
 		}()
@@ -123,11 +123,11 @@ func TestStress(t *testing.T) {
 	wg.Wait()
 }
 
-func TestStressWithSelectOnReceive(t *testing.T) {
+func TestStressWithSelectOnReceive(t *testing.T) { // TODO
 	n := 500000
-	k := 2
+	k := 1
 	c := NewLFChan(capacity)
-	dummy := NewLFChan(capacity)
+	//dummy := NewLFChan(capacity)
 	wg := sync.WaitGroup{}
 	// Run sender
 	for sender := 0; sender < k; sender++ {
@@ -156,11 +156,11 @@ func TestStressWithSelectOnReceive(t *testing.T) {
 							}
 						},
 					},
-					SelectAlternative{
-						channel: dummy,
-						element: ReceiverElement,
-						action: func (result unsafe.Pointer) { t.Fatal("Impossible") },
-					},
+					//SelectAlternative{
+					//	channel: dummy,
+					//	element: ReceiverElement,
+					//	action: func (result unsafe.Pointer) { t.Fatal("Impossible") },
+					//},
 				)
 			}
 		}()
@@ -220,7 +220,7 @@ func TestStressSelects(t *testing.T) {
 }
 
 
-func TestStressBothSendAndReceiveSelect(t *testing.T) {
+func TestStressSelectsOver2Channels(t *testing.T) {
 	n := 50000
 	k := 10
 	c1 := NewLFChan(capacity)

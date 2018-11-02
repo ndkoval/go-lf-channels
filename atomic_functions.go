@@ -45,26 +45,12 @@ func (s *SelectInstance) getState() unsafe.Pointer {
 	return atomic.LoadPointer(&s.state)
 }
 
-func (s *SelectInstance) setState(state unsafe.Pointer) {
-	atomic.StorePointer(&s.state, state)
-}
-
 func (s *SelectInstance) casState(old, new unsafe.Pointer) bool {
 	return atomic.CompareAndSwapPointer(&s.state, old, new)
 }
 
 func IntType(p unsafe.Pointer) int32 {
 	return *(*int32)(p)
-}
-
-// == SelectDesc ==
-
-func (sd *SelectDesc) getStatus() int32 {
-	return atomic.LoadInt32(&sd.status)
-}
-
-func (sd *SelectDesc) setStatus(status int32) {
-	atomic.StoreInt32(&sd.status, status)
 }
 
 // == segment ==

@@ -97,7 +97,7 @@ func (c *LFChan) Receive() unsafe.Pointer {
 func (c *LFChan) tryResume(head *segment, deqIdx uint64, element unsafe.Pointer) unsafe.Pointer {
 	head = c.getHead(nodeId(deqIdx), head)
 	i := indexInNode(deqIdx)
-	cont, isSelectInstance := head.readContinuation(i)
+	cont := head.readContinuation(i)
 
 	elementToReturn := head.data[i * 2 + 1]
 	head.data[i * 2 + 1] = nil
@@ -105,15 +105,15 @@ func (c *LFChan) tryResume(head *segment, deqIdx uint64, element unsafe.Pointer)
 	if cont == broken { return fail }
 	if cont == _element { return elementToReturn }
 
-	if isSelectInstance {
+	if IntType(cont) == SelectInstanceType {
 		selectInstance := (*SelectInstance) (cont)
-		if !selectInstance.trySetState(unsafe.Pointer(c)) {
+		if !selectInstance.trySetState(unsafe.Pointer(c), false) {
 			return fail
 		}
+		result := selectInstance.findAlternative(c).element
 		runtime.SetGParam(selectInstance.gp, element)
 		runtime.UnparkUnsafe(selectInstance.gp)
-		// todo find the result
-		return nil
+		return result
 	} else {
 		runtime.SetGParam(cont, element)
 		runtime.UnparkUnsafe(cont)
@@ -177,33 +177,16 @@ func (c *LFChan) findOrCreateNode(id uint64, cur *segment) *segment {
 	return cur
 }
 
-func (n *segment) readContinuation(i uint32) (cont unsafe.Pointer, isSelectInstance bool) {
-	for {
-		cont := atomic.LoadPointer(&n.data[i * 2])
-		if cont == nil {
-			if atomic.CompareAndSwapPointer(&n.data[i * 2], nil, broken) {
-				return broken, false
-			} else { continue }
+func (s *segment) readContinuation(i uint32) unsafe.Pointer {
+	cont := atomic.LoadPointer(&s.data[i * 2])
+	if cont == nil {
+		if atomic.CompareAndSwapPointer(&s.data[i * 2], nil, broken) {
+			return broken
+		} else {
+			return atomic.LoadPointer(&s.data[i * 2])
 		}
-		if cont == broken || cont == _element {
-			return cont, false
-		}
-		contType := IntType(cont)
-		switch contType {
-		case SelectDescType:
-			desc := (*SelectDesc)(cont)
-			if desc.invoke() {
-				atomic.StorePointer(&n.data[i * 2], broken)
-				return broken, false
-			} else {
-				atomic.CompareAndSwapPointer(&n.data[i * 2], cont, desc.cont)
-				return desc.cont, IntType(desc.cont) == SelectInstanceType
-			}
-		case SelectInstanceType: // *SelectInstance
-			return cont, true
-		default: // *g
-			return cont, false
-		}
+	} else {
+		return cont
 	}
 }
 
@@ -219,142 +202,65 @@ func (c *LFChan) regSelect(selectInstance *SelectInstance, element unsafe.Pointe
 }
 
 func (c *LFChan) regSelectForSend(selectInstance *SelectInstance, element unsafe.Pointer) (bool, RegInfo) {
-	try_again: for { // CAS-loop
+	for {
 		head := c.head()
 		tail := c.tail()
-		senders, receivers := c.counters.getSnapshot()
-		if (senders + 1) <= receivers {
-			deqIdx := senders + 1
-			head = c.getHead(nodeId(deqIdx), head)
-			i := indexInNode(deqIdx)
-			// Set descriptor at first
-			var desc *SelectDesc
-			var descCont unsafe.Pointer
-			var isDescContSelectInstance bool
-			for {
-				descCont, isDescContSelectInstance = head.readContinuation(i)
-				if descCont == broken {
-					c.counters.incSendersFrom(senders)
-					continue try_again
-				}
-				desc = &SelectDesc {
-					__type: SelectDescType,
-					channel: c,
-					selectInstance: selectInstance,
-					cont: descCont,
-				}
-				if head.casContinuation(i, descCont, unsafe.Pointer(desc)) { break }
-			}
-			// Invoke selectDesc and update the continuation's cell
-			if desc.invoke() {
-				head.setContinuation(i, broken)
-			} else {
-				if !selectInstance.isSelected() {
-					head.setContinuation(i, broken)
-					c.counters.incSendersFrom(senders)
-					continue try_again
-				}
-				head.casContinuation(i, unsafe.Pointer(desc), desc.cont)
+		senders, receivers := c.counters.incSendersAndGetSnapshot()
+		if senders <= receivers {
+			if c.tryResume(head, senders, element) != fail {
+				selectInstance.trySetState(unsafe.Pointer(c), true)
+				runtime.UnparkUnsafe(selectInstance.gp)
 				return false, RegInfo{}
 			}
-			// Move deque index forward
-			c.counters.incSendersFrom(senders)
-			// Resume all continuations
-			var anotherG unsafe.Pointer
-			if isDescContSelectInstance {
-				anotherG = ((*SelectInstance) (descCont)).gp
-			} else {
-				anotherG = descCont
-			}
-			runtime.SetGParam(anotherG, element)
-			runtime.UnparkUnsafe(anotherG)
-			runtime.SetGParam(selectInstance.gp, nil)
-			runtime.UnparkUnsafe(selectInstance.gp)
-			return false, RegInfo{}
 		} else {
-			if !c.counters.tryIncSendersFrom(senders, receivers) { continue try_again }
-			enqIdx := senders + 1
-			tail := c.getTail(nodeId(enqIdx), tail)
+			enqIdx := senders
+			tail = c.getTail(nodeId(enqIdx), tail)
 			i := indexInNode(enqIdx)
-			if atomic.CompareAndSwapPointer(&tail.data[i * 2], nil, unsafe.Pointer(selectInstance)) {
-				return true, RegInfo{ tail, i }
-			} else {
-				continue try_again
+			tail.data[i*2+1] = element
+			if senders-receivers <= c.capacity { // do not suspend
+				if tail.casContinuation(i, nil, _element) {
+					selectInstance.trySetState(unsafe.Pointer(c), true)
+					runtime.UnparkUnsafe(selectInstance.gp)
+					return false, RegInfo{}
+				} else {
+					tail.data[i*2+1] = element
+					continue
+				}
+			} else { // suspend
+				if !tail.casContinuation(i, nil, unsafe.Pointer(selectInstance)) {
+					// the cell is broken
+					tail.data[i*2+1] = nil
+					continue
+				}
+				return true, RegInfo{tail, i}
 			}
 		}
 	}
 }
 
 func (c *LFChan) regSelectForReceive(selectInstance *SelectInstance) (added bool, regInfo RegInfo) {
-	try_again: for { // CAS-loop
+	for {
 		head := c.head()
 		tail := c.tail()
-		senders, receivers := c.counters.getSnapshot()
-		if (receivers + 1) <= senders {
-			deqIdx := receivers + 1
-			head = c.getHead(nodeId(deqIdx), head)
-			i := indexInNode(deqIdx)
-			// Set descriptor at first
-			var desc *SelectDesc
-			var descCont unsafe.Pointer
-			var isDescContSelectInstance bool
-			for {
-				descCont, isDescContSelectInstance = head.readContinuation(i)
-				if descCont == broken {
-					c.counters.incReceiversFrom(receivers)
-					continue try_again
-				}
-				desc = &SelectDesc {
-					__type: SelectDescType,
-					channel: c,
-					selectInstance: selectInstance,
-					cont: descCont,
-				}
-				if head.casContinuation(i, descCont, unsafe.Pointer(desc)) { break }
-			}
-			// Invoke selectDesc and update the continuation's cell
-			if desc.invoke() {
-				head.setContinuation(i, broken)
-			} else {
-				if !selectInstance.isSelected() {
-					head.setContinuation(i, broken)
-					c.counters.incReceiversFrom(receivers)
-					continue try_again
-				}
-				head.casContinuation(i, unsafe.Pointer(desc), desc.cont)
-				return false, RegInfo{}
-			}
-			// Move deque index forward
-			c.counters.incReceiversFrom(receivers)
-			// Resume all continuations
-
-			if isElement(descCont) {
-				runtime.SetGParam(selectInstance.gp, nil) // TODO element
+		senders, receivers := c.counters.incReceiversAndGetSnapshot()
+		if receivers <= senders {
+			result := c.tryResume(head, receivers, nil)
+			if result != fail {
+				selectInstance.trySetState(unsafe.Pointer(c), true)
+				runtime.SetGParam(selectInstance.gp, result)
 				runtime.UnparkUnsafe(selectInstance.gp)
 				return false, RegInfo{}
 			}
-
-			var anotherG unsafe.Pointer
-			if isDescContSelectInstance {
-				anotherG = ((*SelectInstance) (descCont)).gp
-			} else {
-				anotherG = descCont
-			}
-			runtime.SetGParam(anotherG, ReceiverElement)
-			runtime.UnparkUnsafe(anotherG)
-			runtime.SetGParam(selectInstance.gp, nil) // TODO element
-			runtime.UnparkUnsafe(selectInstance.gp)
-			return false, RegInfo{}
 		} else {
-			if !c.counters.tryIncReceiversFrom(senders, receivers) { continue try_again }
-			enqIdx := receivers + 1
-			tail := c.getTail(nodeId(enqIdx), tail)
+			enqIdx := receivers
+			tail = c.getTail(nodeId(enqIdx), tail)
 			i := indexInNode(enqIdx)
-			if atomic.CompareAndSwapPointer(&tail.data[i * 2], nil, unsafe.Pointer(selectInstance)) {
-				return true, RegInfo{ tail, i }
-			} else {
-				continue try_again
+			if !tail.casContinuation(i, nil, unsafe.Pointer(selectInstance)) {
+				// the cell is broken
+				tail.data[i*2+1] = nil
+				continue
 			}
+			return true, RegInfo{tail, i}
 		}
 	}
 }
@@ -362,13 +268,14 @@ func (c *LFChan) regSelectForReceive(selectInstance *SelectInstance) (added bool
 
 // == Cleaning ==
 
-func clean(node *segment, index uint32) {
-	cont, _ := node.readContinuation(index)
+func (s *segment) clean(index uint32) {
+	cont := s.readContinuation(index)
 	if cont == broken { return }
-	if !node.casContinuation(index, cont, broken) { return }
-	if atomic.AddUint32(&node._cleaned, 1) < segmentSize { return }
+	if !s.casContinuation(index, cont, broken) { return }
+	s.data[index * 2 + 1] = nil
+	if atomic.AddUint32(&s._cleaned, 1) < segmentSize { return }
 	// Remove the segment
-	node.remove()
+	s.remove()
 }
 
 func (n *segment) isRemoved() bool {
