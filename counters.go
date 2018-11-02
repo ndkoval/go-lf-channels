@@ -8,20 +8,18 @@ type counters struct {
 	highest uint64
 }
 
-const sendersOffset = 32
-const receiversMask = (1 << sendersOffset) - 1
-const sendersInc = 1 << sendersOffset
-
-const minOverflowedValue = 1 << 31
+const _counterOffset = 32 // 32
+const _counterMask = (1 << _counterOffset) - 1
+const _minOverflowedValue = 1 << (_counterOffset - 1)
 
 // if the `lock` field is equals or greater than this value, the write lock is acquired.
-const wLocked = 1 << 30
+const _wLocked = 1 << 30
 
 func (c *counters) acquireReadLock() {
 	// Increment the number of readers
 	lock := atomic.AddUint32(&c.lock, 1)
 	// Wait until write lock is released. It can't be acquired again until we decrement the number of readers.
-	for lock > wLocked { lock = atomic.LoadUint32(&c.lock) }
+	for lock > _wLocked { lock = atomic.LoadUint32(&c.lock) }
 }
 
 func (c *counters) releaseReadLock() {
@@ -34,26 +32,16 @@ func (c *counters) tryAcquireWriteLock() bool {
 	if atomic.LoadUint32(&c.lock) != 0 { return false }
 	// Acquire the write lock if no readers holds it. This strategy is very unfair, but the write lock is used for
 	// fixing overflowing only, therefore all other threads will try to acquire it as well.
-	return atomic.CompareAndSwapUint32(&c.lock, 0, wLocked)
+	return atomic.CompareAndSwapUint32(&c.lock, 0, _wLocked)
 }
 
 func (c *counters) releaseWriteLock() {
-	// Decrement the `lock` field by `wLocked`
-	atomic.AddUint32(&c.lock, ^uint32(wLocked - 1))
-}
-
-
-func countCounters(lowest uint64, highest uint64) (senders uint64, receivers uint64) {
-	ls := lowest >> sendersOffset
-	lr := lowest & receiversMask
-	hs := highest >> sendersOffset
-	hr := highest & receiversMask
-	senders = ls + (hs << 31)
-	receivers = lr + (hr << 31)
-	return
+	// Decrement the `lock` field by `_wLocked`
+	atomic.AddUint32(&c.lock, ^uint32(_wLocked - 1))
 }
 
 func (c *counters) getSnapshot() (senders uint64, receivers uint64) {
+	// Read both `l` and `h` under the read lock
 	c.acquireReadLock()
 	h := c.h()
 	l := c.l()
@@ -61,125 +49,107 @@ func (c *counters) getSnapshot() (senders uint64, receivers uint64) {
 	return countCounters(l, h)
 }
 
+// Increments senders counter if both senders and receivers counters have not been changed
 func (c *counters) tryIncSendersFrom(sendersFrom uint64, receiversFrom uint64) bool {
-	res := false
+	return c.tryIncFrom(_counterOffset, sendersFrom, receiversFrom)
+}
+
+// Increments senders counter if both senders and receivers counters have not been changed
+func (c *counters) tryIncReceiversFrom(sendersFrom uint64, receiversFrom uint64) bool {
+	return c.tryIncFrom(0, sendersFrom, receiversFrom)
+}
+
+func (c *counters) tryIncFrom(counterOffset uint32, sendersFrom uint64, receiversFrom uint64) bool {
+	updated := false
 	c.acquireReadLock()
+	h := c.highest
+	var l uint64
 	for {
-		h := c.highest
-		l := c.l()
+		l = c.l()
 		s, r := countCounters(l, h)
-		if s == sendersFrom && r == receiversFrom {
-			if atomic.CompareAndSwapUint64(&c.lowest, l, l + sendersInc) {
-				res = true
-				break
-			}
-		} else {
+		if r != receiversFrom || s != sendersFrom { break }
+		if atomic.CompareAndSwapUint64(&c.lowest, l, l + 1 << counterOffset) {
+			updated = true
 			break
 		}
 	}
 	c.releaseReadLock()
-	return res
+	if updated { c.fixOverflow(counterOffset, l, h) }
+	return updated
 }
-
 
 func (c *counters) incSendersFrom(sendersFrom uint64) bool {
-	res := false
-	c.acquireReadLock()
-	for {
-		h := c.highest
-		l := c.l()
-		s, _ := countCounters(l, h)
-		if s == sendersFrom {
-			if atomic.CompareAndSwapUint64(&c.lowest, l, l + sendersInc) {
-				res = true
-				break
-			}
-		} else {
-			break
-		}
-	}
-	c.releaseReadLock()
-	return res
-}
-
-func (c *counters) tryIncReceiversFrom(sendersFrom uint64, receiversFrom uint64) bool {
-	res := false
-	c.acquireReadLock()
-	for {
-		h := c.highest
-		l := c.l()
-		s, r := countCounters(l, h)
-		if r == receiversFrom && s == sendersFrom {
-			if atomic.CompareAndSwapUint64(&c.lowest, l, l + 1) {
-				res = true
-				break
-			}
-		} else {
-			break
-		}
-	}
-	c.releaseReadLock()
-	return res
+	return c.incFrom(_counterOffset, sendersFrom)
 }
 
 func (c *counters) incReceiversFrom(receiversFrom uint64) bool {
-	res := false
+	return c.incFrom(0, receiversFrom)
+}
+
+func (c *counters) incFrom(counterOffset uint32, from uint64) bool {
+	updated := false
 	c.acquireReadLock()
+	h := c.highest
+	counterHPart := counterPart(h, counterOffset)
+	var l uint64
 	for {
-		h := c.highest
-		l := c.l()
-		_, r := countCounters(l, h)
-		if r == receiversFrom {
-			if atomic.CompareAndSwapUint64(&c.lowest, l, l + 1) {
-				res = true
-				break
-			}
-		} else {
+		l = c.l()
+		counterLPart := counterPart(l, counterOffset)
+		counter := counterLPart + (counterHPart << (_counterOffset - 1))
+		if counter != from { break }
+		if atomic.CompareAndSwapUint64(&c.lowest, l, l + 1 << counterOffset) {
+			updated = true
 			break
 		}
 	}
 	c.releaseReadLock()
-	return res
+	if updated { c.fixOverflow(counterOffset, l, h) }
+	return updated
 }
 
 func (c *counters) incSendersAndGetSnapshot() (senders uint64, receivers uint64) {
-	c.acquireReadLock()
-	l := atomic.AddUint64(&c.lowest, sendersInc)
-	h := c.highest
-	c.releaseReadLock()
-	if (l >> sendersOffset) >= minOverflowedValue {
-		for {
-			if c.tryAcquireWriteLock() {
-				if c.highest == h {
-					c.lowest -= minOverflowedValue << sendersOffset
-					c.highest = h + 1 // todo hl, hr
-				}
-				c.releaseWriteLock()
-			} else {
-				if c.highest != h { break }
-			}
-		}
-	}
-	return countCounters(l, h)
+	return c.incAndGetSnapshot(_counterOffset)
 }
 
 func (c *counters) incReceiversAndGetSnapshot() (senders uint64, receivers uint64) {
+	return c.incAndGetSnapshot(0)
+}
+
+func (c *counters) incAndGetSnapshot(counterOffset uint32) (senders uint64, receivers uint64) {
 	c.acquireReadLock()
-	l := atomic.AddUint64(&c.lowest, 1)
+	l := atomic.AddUint64(&c.lowest, 1 << counterOffset)
 	h := c.highest
 	c.releaseReadLock()
-	if (l & receiversMask) >= minOverflowedValue {
-		for {
-			if c.tryAcquireWriteLock() {
-				if c.highest == h {
-					c.lowest -= minOverflowedValue
-					c.highest = h + 1
-				}
-				c.releaseWriteLock()
-			} else {
-				if c.highest != h { break }
+	c.fixOverflow(counterOffset, l, counterPart(h, counterOffset))
+	return countCounters(l, h)
+}
+
+func (c *counters) fixOverflow(counterOffset uint32, curLowest uint64, curHighestPart uint64) {
+	if counterPart(curLowest, counterOffset) < _minOverflowedValue { return }
+	for {
+		if c.tryAcquireWriteLock() {
+			if counterPart(c.highest, counterOffset) == curHighestPart {
+				c.lowest -= _minOverflowedValue << counterOffset
+				c.highest += 1 << counterOffset
 			}
+			c.releaseWriteLock()
+			return
+		} else {
+			if counterPart(c.highest, counterOffset) != curHighestPart { return }
 		}
 	}
-	return countCounters(l, h)
+}
+
+func counterPart(counters uint64, counterOffset uint32) uint64 {
+	return (counters >> counterOffset) & _counterMask
+}
+
+func countCounters(lowest uint64, highest uint64) (senders uint64, receivers uint64) {
+	ls := lowest >> _counterOffset
+	lr := lowest & _counterMask
+	hs := highest >> _counterOffset
+	hr := highest & _counterMask
+	senders = ls + (hs << (_counterOffset - 1))
+	receivers = lr + (hr << (_counterOffset - 1))
+	return
 }
