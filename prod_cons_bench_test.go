@@ -13,7 +13,7 @@ import (
 	"unsafe"
 )
 
-const capacity = 0
+const capacity = 2
 const newAlgo = true
 const useProfiler = false
 const approxBatchSize = 100000
@@ -147,21 +147,20 @@ func runBenchmarkKoval(n int, producers int, consumers int, withSelect bool, wor
 			defer wg.Done()
 			var dummyChan *LFChan
 			if withSelect { dummyChan = NewLFChan(0) }
-			alts := &[]SelectAlternative{
-				{
-					channel: c,
-					element: IntToUnsafePointer(10),
-					action:  func(result unsafe.Pointer) {},
-				},
-				{
-					channel: dummyChan,
-					element: ReceiverElement,
-					action:  func(result unsafe.Pointer) {},
-				},
-			}
 			for j := 0; j < n / producers; j++ {
 				if withSelect {
-					Select(alts)
+					Select(
+						SelectAlternative{
+							channel: c,
+							element: IntToUnsafePointer(j),
+							action: func (result unsafe.Pointer) {},
+						},
+						SelectAlternative{
+							channel: dummyChan,
+							element: ReceiverElement,
+							action: func (result unsafe.Pointer) {},
+						},
+					)
 				} else {
 					c.SendInt(j)
 				}
@@ -175,21 +174,20 @@ func runBenchmarkKoval(n int, producers int, consumers int, withSelect bool, wor
 			defer wg.Done()
 			var dummyChan *LFChan
 			if withSelect { dummyChan = NewLFChan(0) }
-			alts := &[]SelectAlternative{
-				{
-					channel: c,
-					element: ReceiverElement,
-					action:  func(result unsafe.Pointer) {},
-				},
-				{
-					channel: dummyChan,
-					element: ReceiverElement,
-					action:  func(result unsafe.Pointer) {},
-				},
-			}
 			for j := 0; j < n / consumers; j++ {
 				if withSelect {
-					Select(alts)
+					Select(
+						SelectAlternative{
+							channel: c,
+							element: ReceiverElement,
+							action: func (result unsafe.Pointer) {},
+						},
+						SelectAlternative{
+							channel: dummyChan,
+							element: ReceiverElement,
+							action: func (result unsafe.Pointer) {},
+						},
+					)
 				} else {
 					c.Receive()
 				}

@@ -14,8 +14,8 @@ type SelectAlternative struct {
 	action  func(result unsafe.Pointer)
 }
 
-func Select(alternatives *[]SelectAlternative)  {
-	selectImpl(alternatives)
+func Select(alternatives ...SelectAlternative)  {
+	selectImpl(&alternatives)
 }
 
 func SelectUnbiased(alternatives ...SelectAlternative) {

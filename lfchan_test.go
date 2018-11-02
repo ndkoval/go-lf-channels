@@ -29,7 +29,7 @@ func TestSimpleSendAndReceiveWithSelect(t *testing.T) {
 	}()
 	// Receive
 	for i := 0; i < N; i++ {
-		Select(&[]SelectAlternative{
+		Select(
 			SelectAlternative{
 				channel: dummy,
 				element: ReceiverElement,
@@ -45,7 +45,7 @@ func TestSimpleSendAndReceiveWithSelect(t *testing.T) {
 					}
 				},
 			},
-		})
+		)
 	}
 }
 
@@ -56,7 +56,7 @@ func TestSimpleSelects(t *testing.T) {
 	// Run sender
 	go func() {
 		for i := 0; i < N; i++ {
-			Select(&[]SelectAlternative{
+			Select(
 				SelectAlternative{
 					channel: c1,
 					element: IntToUnsafePointer(i),
@@ -67,12 +67,12 @@ func TestSimpleSelects(t *testing.T) {
 					element: ReceiverElement,
 					action:  func(result unsafe.Pointer) { t.Fatal("Impossible") },
 				},
-			})
+			)
 		}
 	}()
 	// Receive
 	for i := 0; i < N; i++ {
-		Select(&[]SelectAlternative{
+		Select(
 			SelectAlternative{
 				channel: c2,
 				element: ReceiverElement,
@@ -88,7 +88,7 @@ func TestSimpleSelects(t *testing.T) {
 					}
 				},
 			},
-		})
+		)
 	}
 }
 
@@ -220,7 +220,7 @@ func TestStressSelects(t *testing.T) {
 }
 
 
-func testStressSelectsOver2Channels(t *testing.T) {
+func TestStressSelectsOver2Channels(t *testing.T) {
 	n := 50000
 	k := 10
 	c1 := NewLFChan(capacity)
@@ -284,7 +284,7 @@ func testCancellation(t *testing.T) {
 	for i := 0; i < k; i++ {
 		go func() {
 			for j := 0; j < n; j++ {
-				Select(&[]SelectAlternative{
+				Select(
 					SelectAlternative{
 						channel: dummy,
 						element: ReceiverElement,
@@ -295,7 +295,7 @@ func testCancellation(t *testing.T) {
 						element: ReceiverElement,
 						action: func (result unsafe.Pointer) {},
 					},
-				})
+				)
 			}
 		}()
 	}
