@@ -4,7 +4,6 @@ import (
 	"math/rand"
 	"runtime"
 	"sync/atomic"
-	"time"
 	"unsafe"
 )
 
@@ -40,6 +39,7 @@ func selectImpl(alternatives *[]SelectAlternative) {
 		regInfos: &([]RegInfo{}),
 		state: nil,
 		gp: runtime.GetGoroutine(),
+		rc: make(chan struct{}),
 	}
 	selectInstance.doSelect()
 }
@@ -58,16 +58,27 @@ func (s *SelectInstance) doSelect() {
 func (s *SelectInstance) trySetState(channel unsafe.Pointer, insideRegistration bool) bool {
 	state := s.getState()
 	if insideRegistration {
-		if state != state_registering { panic("Invalid state in registration phase") }
+		if state != state_registering {
+			panic("Invalid state in registration phase")
+		}
 		s.state = channel
 		return true
 	}
-	for state == state_registering { time.Sleep(1); state = s.getState() }
+	i := 0
+	for state == state_registering {
+		i++
+		if i > 64 {
+			<- s.rc
+		}
+		runtime.Gosched()
+		state = s.getState()
+	}
 	if state != state_waiting { return false }
 	return s.casState(state_waiting, channel)
 }
 
 func (s *SelectInstance) selectAlternative() (result unsafe.Pointer, alternative SelectAlternative) {
+	selected := false
 	for _, alt := range *(s.alternatives) {
 		added, regInfo := alt.channel.regSelect(s, alt.element)
 		if added {
@@ -75,9 +86,10 @@ func (s *SelectInstance) selectAlternative() (result unsafe.Pointer, alternative
 			copy(c, *s.regInfos)
 			c = append(c, regInfo)
 			s.regInfos = &c
-		} else { break }
+		} else { selected = true; break }
 	}
-	if s.state == state_registering { atomic.StorePointer(&s.state, state_waiting) }
+	if !selected { atomic.StorePointer(&s.state, state_waiting) }
+	close(s.rc)
 	runtime.ParkUnsafe()
 	result = runtime.GetGParam(s.gp)
 	channel := (*LFChan) (s.state)
@@ -118,6 +130,7 @@ type SelectInstance struct {
 	regInfos     *[]RegInfo
 	state 	     unsafe.Pointer
 	gp           unsafe.Pointer // goroutine
+	rc			 chan struct{}
 }
 var state_registering = unsafe.Pointer(nil)
 var state_waiting = unsafe.Pointer(uintptr(1))
