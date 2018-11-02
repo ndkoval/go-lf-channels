@@ -39,7 +39,6 @@ func selectImpl(alternatives *[]SelectAlternative) {
 		regInfos: &([]RegInfo{}),
 		state: nil,
 		gp: runtime.GetGoroutine(),
-		rc: make(chan struct{}),
 	}
 	selectInstance.doSelect()
 }
@@ -64,12 +63,7 @@ func (s *SelectInstance) trySetState(channel unsafe.Pointer, insideRegistration 
 		s.state = channel
 		return true
 	}
-	i := 0
 	for state == state_registering {
-		i++
-		if i > 64 {
-			<- s.rc
-		}
 		runtime.Gosched()
 		state = s.getState()
 	}
@@ -89,7 +83,6 @@ func (s *SelectInstance) selectAlternative() (result unsafe.Pointer, alternative
 		} else { selected = true; break }
 	}
 	if !selected { atomic.StorePointer(&s.state, state_waiting) }
-	close(s.rc)
 	runtime.ParkUnsafe()
 	result = runtime.GetGParam(s.gp)
 	channel := (*LFChan) (s.state)
@@ -130,7 +123,6 @@ type SelectInstance struct {
 	regInfos     *[]RegInfo
 	state 	     unsafe.Pointer
 	gp           unsafe.Pointer // goroutine
-	rc			 chan struct{}
 }
 var state_registering = unsafe.Pointer(nil)
 var state_waiting = unsafe.Pointer(uintptr(1))
