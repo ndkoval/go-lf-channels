@@ -6,15 +6,9 @@ import (
 	"unsafe"
 )
 
-// Determines whether the specified pointer references an element or an internal (including `G`) structure.
-// TODO let's make the address of all internal data structures with a specified bit. This change, however, requires
-// TODO a huge work, so we assume that small integers are passed to this channel only.
-func isElement(p unsafe.Pointer) bool {
-	return uintptr(p) < 0xc000000000
-}
-
 var broken = (unsafe.Pointer) ((uintptr) (1))
 var fail = (unsafe.Pointer) ((uintptr) (2))
+var _element = (unsafe.Pointer) ((uintptr) (3))
 
 // == Channel structure ==
 
@@ -46,7 +40,7 @@ type segment struct {
 	_next    unsafe.Pointer
 	_cleaned uint32
 	_prev    unsafe.Pointer
-	data     [segmentSize]unsafe.Pointer
+	data     [segmentSize*2]unsafe.Pointer
 }
 
 func newNode(id uint64, prev *segment) *segment {
@@ -104,7 +98,13 @@ func (c *LFChan) tryResume(head *segment, deqIdx uint64, element unsafe.Pointer)
 	head = c.getHead(nodeId(deqIdx), head)
 	i := indexInNode(deqIdx)
 	cont, isSelectInstance := head.readContinuation(i)
+
+	elementToReturn := head.data[i * 2 + 1]
+	head.data[i * 2 + 1] = nil
+
 	if cont == broken { return fail }
+	if cont == _element { return elementToReturn }
+
 	if isSelectInstance {
 		selectInstance := (*SelectInstance) (cont)
 		if !selectInstance.trySetState(unsafe.Pointer(c)) {
@@ -115,22 +115,21 @@ func (c *LFChan) tryResume(head *segment, deqIdx uint64, element unsafe.Pointer)
 		// todo find the result
 		return nil
 	} else {
-		if isElement(cont) { return cont } // todo fix this
-		result := runtime.GetGParam(cont)
 		runtime.SetGParam(cont, element)
 		runtime.UnparkUnsafe(cont)
-		return result
+		return elementToReturn
 	}
 }
 
 func (c *LFChan) trySuspendAndReturn(tail *segment, enqIdx uint64, element unsafe.Pointer, suspend bool) unsafe.Pointer {
 	tail = c.getTail(nodeId(enqIdx), tail)
 	i := indexInNode(enqIdx)
+	tail.data[i * 2 + 1] = element
 	if suspend {
 		curG := runtime.GetGoroutine()
-		runtime.SetGParam(curG, element)
 		if !tail.casContinuation(i, nil, curG) {
-			runtime.SetGParam(curG, nil)
+			// the cell is broken
+			tail.data[i * 2 + 1] = nil
 			return fail
 		}
 		runtime.ParkUnsafe()
@@ -138,7 +137,12 @@ func (c *LFChan) trySuspendAndReturn(tail *segment, enqIdx uint64, element unsaf
 		runtime.SetGParam(curG, nil)
 		return result
 	} else { // buffering
-		if tail.casContinuation(i, nil, element) { return nil } else { return fail }
+		if tail.casContinuation(i, nil, _element) {
+			return nil
+		} else {
+			tail.data[i * 2 + 1] = nil
+			return fail
+		}
 	}
 }
 
@@ -175,16 +179,13 @@ func (c *LFChan) findOrCreateNode(id uint64, cur *segment) *segment {
 
 func (n *segment) readContinuation(i uint32) (cont unsafe.Pointer, isSelectInstance bool) {
 	for {
-		cont := atomic.LoadPointer(&n.data[i])
+		cont := atomic.LoadPointer(&n.data[i * 2])
 		if cont == nil {
-			if atomic.CompareAndSwapPointer(&n.data[i], nil, broken) {
+			if atomic.CompareAndSwapPointer(&n.data[i * 2], nil, broken) {
 				return broken, false
 			} else { continue }
 		}
-		if cont == broken {
-			return broken, false
-		}
-		if isElement(cont) {
+		if cont == broken || cont == _element {
 			return cont, false
 		}
 		contType := IntType(cont)
@@ -192,10 +193,10 @@ func (n *segment) readContinuation(i uint32) (cont unsafe.Pointer, isSelectInsta
 		case SelectDescType:
 			desc := (*SelectDesc)(cont)
 			if desc.invoke() {
-				atomic.StorePointer(&n.data[i], broken)
+				atomic.StorePointer(&n.data[i * 2], broken)
 				return broken, false
 			} else {
-				atomic.CompareAndSwapPointer(&n.data[i], cont, desc.cont)
+				atomic.CompareAndSwapPointer(&n.data[i * 2], cont, desc.cont)
 				return desc.cont, IntType(desc.cont) == SelectInstanceType
 			}
 		case SelectInstanceType: // *SelectInstance
@@ -275,7 +276,7 @@ func (c *LFChan) regSelectForSend(selectInstance *SelectInstance, element unsafe
 			enqIdx := senders + 1
 			tail := c.getTail(nodeId(enqIdx), tail)
 			i := indexInNode(enqIdx)
-			if atomic.CompareAndSwapPointer(&tail.data[i], nil, unsafe.Pointer(selectInstance)) {
+			if atomic.CompareAndSwapPointer(&tail.data[i * 2], nil, unsafe.Pointer(selectInstance)) {
 				return true, RegInfo{ tail, i }
 			} else {
 				continue try_again
@@ -349,7 +350,7 @@ func (c *LFChan) regSelectForReceive(selectInstance *SelectInstance) (added bool
 			enqIdx := receivers + 1
 			tail := c.getTail(nodeId(enqIdx), tail)
 			i := indexInNode(enqIdx)
-			if atomic.CompareAndSwapPointer(&tail.data[i], nil, unsafe.Pointer(selectInstance)) {
+			if atomic.CompareAndSwapPointer(&tail.data[i * 2], nil, unsafe.Pointer(selectInstance)) {
 				return true, RegInfo{ tail, i }
 			} else {
 				continue try_again

@@ -94,7 +94,7 @@ func TestSimpleSelects(t *testing.T) {
 
 func TestStress(t *testing.T) {
 	n := 500000
-	k := 10
+	k := 1
 	c := NewLFChan(capacity)
 	wg := sync.WaitGroup{}
 	// Run sender
@@ -102,7 +102,7 @@ func TestStress(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for i := 100; i < n; i++ {
+			for i := 0; i < n; i++ {
 				c.SendInt(i)
 			}
 		}()
@@ -112,10 +112,10 @@ func TestStress(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for i := 100; i < n; i++ {
+			for i := 0; i < n; i++ {
 				x := c.ReceiveInt()
 				if x != i {
-					//t.Fatal("Expected ", i, ", found ", x)
+					t.Fatal("Expected ", i, ", found ", x)
 				}
 			}
 		}()
