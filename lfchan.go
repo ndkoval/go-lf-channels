@@ -109,14 +109,13 @@ func (c *LFChan) tryResume(head *segment, deqIdx uint64, element unsafe.Pointer)
 		selectInstance := (*SelectInstance) (cont)
 		selected, non_suspended := selectInstance.trySetState(unsafe.Pointer(c), false)
 		if !selected { return fail }
-		result := selectInstance.findAlternative(c).element
 		runtime.SetGParam(selectInstance.gp, element)
 		if non_suspended {
 			selectInstance.trySetState(state_finished2, true)
 		} else {
 			runtime.UnparkUnsafe(selectInstance.gp)
 		}
-		return result
+		return elementToReturn
 	} else {
 		runtime.SetGParam(cont, element)
 		runtime.UnparkUnsafe(cont)
@@ -226,7 +225,7 @@ func (c *LFChan) regSelectForSend(selectInstance *SelectInstance, element unsafe
 					runtime.UnparkUnsafe(selectInstance.gp)
 					return false, RegInfo{}
 				} else {
-					tail.data[i*2+1] = element
+					tail.data[i*2+1] = nil
 					continue
 				}
 			} else { // suspend
@@ -272,9 +271,10 @@ func (c *LFChan) regSelectForReceive(selectInstance *SelectInstance) (added bool
 // == Cleaning ==
 
 func (s *segment) clean(index uint32) {
-	cont := s.readContinuation(index)
-	if cont == broken { return }
-	if !s.casContinuation(index, cont, broken) { return }
+	//cont := s.readContinuation(index)
+	//if cont == broken { return }
+	//if !s.casContinuation(index, cont, broken) { return }
+	atomic.StorePointer(&s.data[index * 2], broken)
 	s.data[index * 2 + 1] = nil
 	if atomic.AddUint32(&s._cleaned, 1) < segmentSize { return }
 	// Remove the segment

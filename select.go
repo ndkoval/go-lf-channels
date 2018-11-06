@@ -35,12 +35,10 @@ func SelectImpl(alternatives []SelectAlternative) {
 	selectInstance := &SelectInstance {
 		__type: SelectInstanceType,
 		id: nextSelectInstanceId(),
-		alternatives: alternatives,
-		//regInfos: &([]RegInfo{}),
 		state: nil,
 		gp: runtime.GetGoroutine(),
 	}
-	selectInstance.doSelect()
+	selectInstance.doSelect(alternatives)
 }
 
 // Performs select in 3-phase way. At first it selects
@@ -48,8 +46,8 @@ func SelectImpl(alternatives []SelectAlternative) {
 // then it unregisters from unselected channels,
 // and invokes the specified for the selected
 // alternative action at last.
-func (s *SelectInstance) doSelect() {
-	result, alternative, reginfos := s.selectAlternative()
+func (s *SelectInstance) doSelect(alternatives []SelectAlternative) {
+	result, alternative, reginfos := s.selectAlternative(alternatives)
 	s.cancelNonSelectedAlternatives(reginfos)
 	alternative.action(result)
 }
@@ -77,16 +75,16 @@ func (s *SelectInstance) trySetState(channel unsafe.Pointer, insideRegistration 
 	}
 }
 
-func (s *SelectInstance) selectAlternative() (result unsafe.Pointer, alternative SelectAlternative, reginfos [2]RegInfo) {
+func (s *SelectInstance) selectAlternative(alternatives []SelectAlternative) (result unsafe.Pointer, alternative SelectAlternative, reginfos [2]RegInfo) {
 	reginfos = [2]RegInfo{}
 	selected := false
-	for i, alt := range s.alternatives {
+	for i, alt := range alternatives {
 		if s.getState() != state_registering {
 			channel := (*LFChan) (s.state)
 			atomic.StorePointer(&s.state, state_finished)
 			for s.getState() != state_finished2 { }
 			result = runtime.GetGParam(s.gp)
-			alternative = s.findAlternative(channel)
+			alternative = s.findAlternative(channel, alternatives)
 			return
 		}
 		added, regInfo := alt.channel.regSelect(s, alt.element)
@@ -103,7 +101,7 @@ func (s *SelectInstance) selectAlternative() (result unsafe.Pointer, alternative
 	runtime.ParkUnsafe(s.gp)
 	result = runtime.GetGParam(s.gp)
 	channel := (*LFChan) (s.state)
-	alternative = s.findAlternative(channel)
+	alternative = s.findAlternative(channel, alternatives)
 	return
 }
 
@@ -112,8 +110,8 @@ func (s *SelectInstance) selectAlternative() (result unsafe.Pointer, alternative
  * that `state` field stores the selected channel and looks for an alternative
  * with this channel.
  */
-func (s *SelectInstance) findAlternative(channel *LFChan) SelectAlternative {
-	for _, alt := range s.alternatives {
+func (s *SelectInstance) findAlternative(channel *LFChan, alternatives []SelectAlternative) SelectAlternative {
+	for _, alt := range alternatives {
 		if alt.channel == channel {
 			return alt
 		}
@@ -138,8 +136,7 @@ const SelectInstanceType int32 = 1298498092
 type SelectInstance struct {
 	__type 	     int32
 	id 	         uint64
-	alternatives []SelectAlternative
-	//regInfos     *[]RegInfo
+	//alternatives []SelectAlternative
 	state 	     unsafe.Pointer
 	gp           unsafe.Pointer // goroutine
 }
