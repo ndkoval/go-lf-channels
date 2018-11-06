@@ -13,7 +13,7 @@ import (
 	"unsafe"
 )
 
-const capacity = 2
+const capacity = 0
 const newAlgo = true
 const useProfiler = false
 const approxBatchSize = 100000
@@ -24,7 +24,7 @@ var work = []int{100} // an additional work size (parameter for `consumeCPU`) fo
 
 // Multiple producer single consumer
 func BenchmarkN1(b *testing.B) {
-	for _, withSelect := range [2]bool{false, true} {
+	for _, withSelect := range [...]bool{true} {
 		for _, work := range work {
 			for _, parallelism := range parallelism {
 				consumers := 1
@@ -43,7 +43,7 @@ func BenchmarkN1(b *testing.B) {
 
 // Multiple producer multiple consumer
 func BenchmarkNN(b *testing.B) {
-	for _, withSelect := range [2]bool{false, true} {
+	for _, withSelect := range [...]bool{true} {
 		for _, work := range work {
 			for _, goroutines := range goroutines {
 				for _, parallelism := range parallelism {
@@ -147,20 +147,21 @@ func runBenchmarkKoval(n int, producers int, consumers int, withSelect bool, wor
 			defer wg.Done()
 			var dummyChan *LFChan
 			if withSelect { dummyChan = NewLFChan(0) }
+			alts := []SelectAlternative{
+				{
+					channel: c,
+					element: IntToUnsafePointer(1),
+					action:  dummy,
+				},
+				{
+					channel: dummyChan,
+					element: ReceiverElement,
+					action:  dummy,
+				},
+			}
 			for j := 0; j < n / producers; j++ {
 				if withSelect {
-					Select(
-						SelectAlternative{
-							channel: c,
-							element: IntToUnsafePointer(j),
-							action: func (result unsafe.Pointer) {},
-						},
-						SelectAlternative{
-							channel: dummyChan,
-							element: ReceiverElement,
-							action: func (result unsafe.Pointer) {},
-						},
-					)
+					SelectImpl(alts)
 				} else {
 					c.SendInt(j)
 				}
@@ -174,20 +175,21 @@ func runBenchmarkKoval(n int, producers int, consumers int, withSelect bool, wor
 			defer wg.Done()
 			var dummyChan *LFChan
 			if withSelect { dummyChan = NewLFChan(0) }
+			alts := []SelectAlternative{
+				{
+					channel: c,
+					element: ReceiverElement,
+					action:  dummy,
+				},
+				{
+					channel: dummyChan,
+					element: ReceiverElement,
+					action:  dummy,
+				},
+			}
 			for j := 0; j < n / consumers; j++ {
 				if withSelect {
-					Select(
-						SelectAlternative{
-							channel: c,
-							element: ReceiverElement,
-							action: func (result unsafe.Pointer) {},
-						},
-						SelectAlternative{
-							channel: dummyChan,
-							element: ReceiverElement,
-							action: func (result unsafe.Pointer) {},
-						},
-					)
+					SelectImpl(alts)
 				} else {
 					c.Receive()
 				}
@@ -197,6 +199,8 @@ func runBenchmarkKoval(n int, producers int, consumers int, withSelect bool, wor
 	}
 	wg.Wait()
 }
+
+func dummy(result unsafe.Pointer) {}
 
 var consumedCPU = int32(time.Now().Unix())
 func ConsumeCPU(tokens int) {
