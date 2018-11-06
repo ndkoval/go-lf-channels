@@ -1,31 +1,49 @@
 package main
 
 import (
-	"unsafe"
+	"log"
+	"os"
 	"runtime"
+	"runtime/pprof"
 	"sync"
+	"unsafe"
 )
 
 func main() {
-	CPU := 144
-	n := 100000
-	runtime.GOMAXPROCS(CPU)
+	runtime.SetCPUProfileRate(1000)
+	f, err := os.Create("main.pprof")
+	if err != nil { log.Fatal(err) }
+	pprof.StartCPUProfile(f)
+	defer pprof.StopCPUProfile()
+
+	CPU := 2
+	n := 10000000
+	runtime.GOMAXPROCS(1)
 	c := NewLFChan(0)
+	//c := make(chan int)
 	wg := sync.WaitGroup{}
 	wg.Add(CPU)
 	for producer := 0; producer < CPU / 2; producer++ {
 		go func() {
+			alts := []SelectAlternative{{channel: c, element: IntToUnsafePointer(0), action: func(result unsafe.Pointer) {}}}
 			defer wg.Done()
 			for i := 0; i < n; i++ {
-				c.SendInt(i)
+				//select { case c <- i: {} }
+				SelectImpl(alts)
+				//c.SendInt(i)
+				//c <- i
 			}
 		}()
 	}
 	for consumer := 0; consumer < CPU / 2; consumer++ {
 		go func() {
+			alts := []SelectAlternative{{channel: c, element: ReceiverElement, action: func(result unsafe.Pointer) {}}}
 			defer wg.Done()
 			for i := 0; i < n; i++ {
-				c.ReceiveInt()
+				//select { case <- c: {} }
+				SelectImpl(alts)
+				//c.ReceiveInt()
+				//<- c
 			}
 		}()
 	}

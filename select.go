@@ -15,28 +15,28 @@ type SelectAlternative struct {
 }
 
 func Select(alternatives ...SelectAlternative)  {
-	selectImpl(&alternatives)
+	SelectImpl(alternatives)
 }
 
 func SelectUnbiased(alternatives ...SelectAlternative) {
-	shuffleAlternatives(&alternatives)
-	selectImpl(&alternatives)
+	alternatives = shuffleAlternatives(alternatives)
+	SelectImpl(alternatives)
 }
 
 // Shuffles alternatives randomly for `SelectUnbiased`.
-func shuffleAlternatives(alternatives *[]SelectAlternative) {
-	alts := *alternatives
+func shuffleAlternatives(alts []SelectAlternative) []SelectAlternative {
 	rand.Shuffle(len(alts), func (i, j int) {
 		alts[i], alts[j] = alts[j], alts[i]
 	})
+	return alts
 }
 
-func selectImpl(alternatives *[]SelectAlternative) {
+func SelectImpl(alternatives []SelectAlternative) {
 	selectInstance := &SelectInstance {
 		__type: SelectInstanceType,
 		id: nextSelectInstanceId(),
 		alternatives: alternatives,
-		regInfos: &([]RegInfo{}),
+		//regInfos: &([]RegInfo{}),
 		state: nil,
 		gp: runtime.GetGoroutine(),
 	}
@@ -49,8 +49,8 @@ func selectImpl(alternatives *[]SelectAlternative) {
 // and invokes the specified for the selected
 // alternative action at last.
 func (s *SelectInstance) doSelect() {
-	result, alternative := s.selectAlternative()
-	s.cancelNonSelectedAlternatives()
+	result, alternative, reginfos := s.selectAlternative()
+	s.cancelNonSelectedAlternatives(reginfos)
 	alternative.action(result)
 }
 
@@ -62,12 +62,10 @@ func (s *SelectInstance) trySetState(channel unsafe.Pointer, insideRegistration 
 	} else {
 		if state == state_registering {
 			if s.casState(state_registering, channel) {
-				i := 0
 				for {
 					state = s.getState()
 					if state != channel { break }
-					i++
-					if i % 64 == 0 { runtime.Gosched() }
+					runtime.Gosched()
 				}
 				if state == state_finished { return true, true }
 			} else {
@@ -79,9 +77,10 @@ func (s *SelectInstance) trySetState(channel unsafe.Pointer, insideRegistration 
 	}
 }
 
-func (s *SelectInstance) selectAlternative() (result unsafe.Pointer, alternative SelectAlternative) {
+func (s *SelectInstance) selectAlternative() (result unsafe.Pointer, alternative SelectAlternative, reginfos [2]RegInfo) {
+	reginfos = [2]RegInfo{}
 	selected := false
-	for _, alt := range *(s.alternatives) {
+	for i, alt := range s.alternatives {
 		if s.getState() != state_registering {
 			channel := (*LFChan) (s.state)
 			atomic.StorePointer(&s.state, state_finished)
@@ -92,10 +91,7 @@ func (s *SelectInstance) selectAlternative() (result unsafe.Pointer, alternative
 		}
 		added, regInfo := alt.channel.regSelect(s, alt.element)
 		if added {
-			c := make([]RegInfo, len(*s.regInfos))
-			copy(c, *s.regInfos)
-			c = append(c, regInfo)
-			s.regInfos = &c
+			reginfos[i] = regInfo
 		} else {
 			selected = true
 			break
@@ -104,7 +100,7 @@ func (s *SelectInstance) selectAlternative() (result unsafe.Pointer, alternative
 	if !selected {
 		atomic.StorePointer(&s.state, state_waiting)
 	}
-	runtime.ParkUnsafe()
+	runtime.ParkUnsafe(s.gp)
 	result = runtime.GetGParam(s.gp)
 	channel := (*LFChan) (s.state)
 	alternative = s.findAlternative(channel)
@@ -117,7 +113,7 @@ func (s *SelectInstance) selectAlternative() (result unsafe.Pointer, alternative
  * with this channel.
  */
 func (s *SelectInstance) findAlternative(channel *LFChan) SelectAlternative {
-	for _, alt := range *(s.alternatives) {
+	for _, alt := range s.alternatives {
 		if alt.channel == channel {
 			return alt
 		}
@@ -125,9 +121,11 @@ func (s *SelectInstance) findAlternative(channel *LFChan) SelectAlternative {
 	panic("Impossible")
 }
 
-func (s *SelectInstance) cancelNonSelectedAlternatives() {
-	for _, ri := range *s.regInfos {
-		ri.segment.clean(ri.index)
+func (s *SelectInstance) cancelNonSelectedAlternatives(reginfos [2]RegInfo) {
+	for _, ri := range reginfos {
+		if ri.segment != nil {
+			ri.segment.clean(ri.index)
+		}
 	}
 }
 
@@ -140,8 +138,8 @@ const SelectInstanceType int32 = 1298498092
 type SelectInstance struct {
 	__type 	     int32
 	id 	         uint64
-	alternatives *[]SelectAlternative
-	regInfos     *[]RegInfo
+	alternatives []SelectAlternative
+	//regInfos     *[]RegInfo
 	state 	     unsafe.Pointer
 	gp           unsafe.Pointer // goroutine
 }

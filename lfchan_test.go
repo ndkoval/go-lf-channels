@@ -220,7 +220,7 @@ func TestStressSelects(t *testing.T) {
 }
 
 
-func TestStressSelectsOver2Channels(t *testing.T) {
+func testStressSelectsOver2Channels(t *testing.T) {
 	n := 50000
 	k := 10
 	c1 := NewLFChan(capacity)

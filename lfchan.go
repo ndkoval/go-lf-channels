@@ -135,7 +135,7 @@ func (c *LFChan) trySuspendAndReturn(tail *segment, enqIdx uint64, element unsaf
 			tail.data[i * 2 + 1] = nil
 			return fail
 		}
-		runtime.ParkUnsafe()
+		runtime.ParkUnsafe(curG)
 		result := runtime.GetGParam(curG)
 		runtime.SetGParam(curG, nil)
 		return result
