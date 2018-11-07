@@ -274,7 +274,7 @@ func (s *segment) clean(index uint32) {
 	//cont := s.readContinuation(index)
 	//if cont == broken { return }
 	//if !s.casContinuation(index, cont, broken) { return }
-	atomic.StorePointer(&s.data[index * 2], broken)
+	s.data[index * 2] = broken
 	s.data[index * 2 + 1] = nil
 	if atomic.AddUint32(&s._cleaned, 1) < segmentSize { return }
 	// Remove the segment
