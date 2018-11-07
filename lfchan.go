@@ -81,7 +81,7 @@ func (c *LFChan) Receive() unsafe.Pointer {
 		tail := c.tail()
 		senders, receivers := c.counters.incReceiversAndGetSnapshot()
 		if receivers <= senders {
-			result := c.tryResume(head, receivers, nil)
+			result := c.tryResume(head, receivers, ReceiverElement)
 			if result != fail {
 				return result
 			}
@@ -109,10 +109,10 @@ func (c *LFChan) tryResume(head *segment, deqIdx uint64, element unsafe.Pointer)
 		selectInstance := (*SelectInstance) (cont)
 		selected, non_suspended := selectInstance.trySetState(unsafe.Pointer(c), false)
 		if !selected { return fail }
-		runtime.SetGParam(selectInstance.gp, element)
 		if non_suspended {
-			selectInstance.trySetState(state_finished2, true)
+			atomic.StorePointer(&selectInstance.result, element)
 		} else {
+			runtime.SetGParam(selectInstance.gp, element)
 			runtime.UnparkUnsafe(selectInstance.gp)
 		}
 		return elementToReturn
@@ -211,7 +211,7 @@ func (c *LFChan) regSelectForSend(selectInstance *SelectInstance, element unsafe
 		if senders <= receivers {
 			if c.tryResume(head, senders, element) != fail {
 				selectInstance.trySetState(unsafe.Pointer(c), true)
-				runtime.UnparkUnsafe(selectInstance.gp)
+				selectInstance.result = ReceiverElement
 				return false, RegInfo{}
 			}
 		} else {
@@ -222,7 +222,7 @@ func (c *LFChan) regSelectForSend(selectInstance *SelectInstance, element unsafe
 			if senders-receivers <= c.capacity { // do not suspend
 				if tail.casContinuation(i, nil, _element) {
 					selectInstance.trySetState(unsafe.Pointer(c), true)
-					runtime.UnparkUnsafe(selectInstance.gp)
+					selectInstance.result = ReceiverElement
 					return false, RegInfo{}
 				} else {
 					tail.data[i*2+1] = nil
@@ -246,11 +246,10 @@ func (c *LFChan) regSelectForReceive(selectInstance *SelectInstance) (added bool
 		tail := c.tail()
 		senders, receivers := c.counters.incReceiversAndGetSnapshot()
 		if receivers <= senders {
-			result := c.tryResume(head, receivers, nil)
+			result := c.tryResume(head, receivers, ReceiverElement)
 			if result != fail {
 				selectInstance.trySetState(unsafe.Pointer(c), true)
-				runtime.SetGParam(selectInstance.gp, result)
-				runtime.UnparkUnsafe(selectInstance.gp)
+				selectInstance.result = result
 				return false, RegInfo{}
 			}
 		} else {

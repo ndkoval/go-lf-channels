@@ -32,11 +32,10 @@ func shuffleAlternatives(alts []SelectAlternative) []SelectAlternative {
 }
 
 func SelectImpl(alternatives []SelectAlternative) {
+	id := nextSelectInstanceId()
 	selectInstance := &SelectInstance {
 		__type: SelectInstanceType,
-		id: nextSelectInstanceId(),
-		state: nil,
-		gp: runtime.GetGoroutine(),
+		id: id,
 	}
 	selectInstance.doSelect(alternatives)
 }
@@ -77,13 +76,15 @@ func (s *SelectInstance) trySetState(channel unsafe.Pointer, insideRegistration 
 
 func (s *SelectInstance) selectAlternative(alternatives []SelectAlternative) (result unsafe.Pointer, alternative SelectAlternative, reginfos [2]RegInfo) {
 	reginfos = [2]RegInfo{}
-	selected := false
 	for i, alt := range alternatives {
 		if s.getState() != state_registering {
 			channel := (*LFChan) (s.state)
 			atomic.StorePointer(&s.state, state_finished)
-			for s.getState() != state_finished2 { }
-			result = runtime.GetGParam(s.gp)
+
+			result = atomic.LoadPointer(&s.result)
+			for result == nil { result = atomic.LoadPointer(&s.result) }
+			s.result = nil
+
 			alternative = s.findAlternative(channel, alternatives)
 			return
 		}
@@ -91,13 +92,14 @@ func (s *SelectInstance) selectAlternative(alternatives []SelectAlternative) (re
 		if added {
 			reginfos[i] = regInfo
 		} else {
-			selected = true
-			break
+			alternative = alt
+			result = s.result
+			s.result = nil
+			return
 		}
 	}
-	if !selected {
-		atomic.StorePointer(&s.state, state_waiting)
-	}
+	s.gp = runtime.GetGoroutine()
+	atomic.StorePointer(&s.state, state_waiting)
 	runtime.ParkUnsafe(s.gp)
 	result = runtime.GetGParam(s.gp)
 	channel := (*LFChan) (s.state)
@@ -136,14 +138,13 @@ const SelectInstanceType int32 = 1298498092
 type SelectInstance struct {
 	__type 	     int32
 	id 	         uint64
-	//alternatives []SelectAlternative
 	state 	     unsafe.Pointer
 	gp           unsafe.Pointer // goroutine
+	result		 unsafe.Pointer
 }
 var state_registering = unsafe.Pointer(nil)
 var state_waiting = unsafe.Pointer(uintptr(1))
 var state_finished = unsafe.Pointer(uintptr(2))
-var state_finished2 = unsafe.Pointer(uintptr(2))
 
 type RegInfo struct {
 	segment *segment
