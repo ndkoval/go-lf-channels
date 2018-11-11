@@ -15,18 +15,6 @@ const _minOverflowedValue = 1 << (_counterOffset - 1)
 // if the `lock` field is equals or greater than this value, the write lock is acquired.
 const _wLocked = 1 << 30
 
-func (c *LFChan) acquireReadLock() {
-	// Increment the number of readers
-	lock := atomic.AddUint32(&c.lock, 1)
-	// Wait until write lock is released. It can't be acquired again until we decrement the number of readers.
-	for lock > _wLocked { lock = atomic.LoadUint32(&c.lock) }
-}
-
-func (c *LFChan) releaseReadLock() {
-	// Decrement the number of readers
-	atomic.AddUint32(&c.lock, ^uint32(0))
-}
-
 func (c *LFChan) tryAcquireWriteLock() bool {
 	// Check if no readers holds the lock
 	if atomic.LoadUint32(&c.lock) != 0 { return false }
