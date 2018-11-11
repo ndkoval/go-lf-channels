@@ -46,8 +46,7 @@ type segment struct {
 	_next    unsafe.Pointer
 	_cleaned uint32
 	_prev    unsafe.Pointer
-	conts    [segmentSize]unsafe.Pointer
-	elements [segmentSize]unsafe.Pointer
+	data     [segmentSize*2]unsafe.Pointer
 }
 
 func newNode(id uint64, prev *segment) *segment {
@@ -59,12 +58,10 @@ func newNode(id uint64, prev *segment) *segment {
 	}
 }
 
-//go:nosplit
 func indexInNode(index uint64) uint32 {
 	return uint32(index & segmentIndexMask)
 }
 
-//go:nosplit
 func nodeId(index uint64) uint64 {
 	return index >> segmentSizeShift
 }
@@ -131,8 +128,8 @@ func (c *LFChan) tryResumeSimpleReceive(head *segment, deqIdx uint64) unsafe.Poi
 
 	if cont == broken { return fail }
 	if cont == _element {
-		elementToReturn := head.elements[i]
-		head.elements[i] = nil
+		elementToReturn := head.data[i * 2 + 1]
+		head.data[i * 2 + 1] = nil
 		return elementToReturn
 	}
 
@@ -141,8 +138,8 @@ func (c *LFChan) tryResumeSimpleReceive(head *segment, deqIdx uint64) unsafe.Poi
 		runtime.UnparkUnsafe(cont)
 		return elementToReturn
 	} else {
-		elementToReturn := head.elements[i]
-		head.elements[i] = nil
+		elementToReturn := head.data[i * 2 + 1]
+		head.data[i * 2 + 1] = nil
 		selectInstance := (*SelectInstance)(cont)
 		if selectInstance.trySelectSimple(c, ReceiverElement) {
 			return elementToReturn
@@ -157,8 +154,8 @@ func (c *LFChan) tryResume(head *segment, deqIdx uint64, element unsafe.Pointer,
 	i := indexInNode(deqIdx)
 	cont := head.readContinuation(i)
 
-	elementToReturn := head.elements[i]
-	head.elements[i] = nil
+	elementToReturn := head.data[i * 2 + 1]
+	head.data[i * 2 + 1] = nil
 
 	if cont == broken { return fail }
 	if cont == _element { return elementToReturn }
@@ -214,11 +211,11 @@ func (c *LFChan) trySuspendAndReturnSend(tail *segment, enqIdx uint64, element u
 		runtime.ParkUnsafe(curG)
 		return true
 	} else { // buffering
-		tail.elements[i] = element
+		tail.data[i * 2 + 1] = element
 		if tail.casContinuation(i, nil, _element) {
 			return true
 		} else {
-			tail.elements[i] = nil
+			tail.data[i * 2 + 1] = nil
 			return false
 		}
 	}
@@ -227,12 +224,12 @@ func (c *LFChan) trySuspendAndReturnSend(tail *segment, enqIdx uint64, element u
 func (c *LFChan) trySuspendAndReturn(tail *segment, enqIdx uint64, element unsafe.Pointer, suspend bool) unsafe.Pointer {
 	tail = c.getTail(nodeId(enqIdx), tail)
 	i := indexInNode(enqIdx)
-	tail.elements[i] = element
+	tail.data[i * 2 + 1] = element
 	if suspend {
 		curG := runtime.GetGoroutine()
 		if !tail.casContinuation(i, nil, curG) {
 			// the cell is broken
-			tail.elements[i] = nil
+			tail.data[i * 2 + 1] = nil
 			return fail
 		}
 		runtime.ParkUnsafe(curG)
@@ -243,7 +240,7 @@ func (c *LFChan) trySuspendAndReturn(tail *segment, enqIdx uint64, element unsaf
 		if tail.casContinuation(i, nil, _element) {
 			return nil
 		} else {
-			tail.elements[i] = nil
+			tail.data[i * 2 + 1] = nil
 			return fail
 		}
 	}
@@ -281,12 +278,12 @@ func (c *LFChan) findOrCreateNode(id uint64, cur *segment) *segment {
 }
 
 func (s *segment) readContinuation(i uint32) unsafe.Pointer {
-	cont := atomic.LoadPointer(&s.conts[i])
+	cont := atomic.LoadPointer(&s.data[i * 2])
 	if cont == nil {
-		if atomic.CompareAndSwapPointer(&s.conts[i], nil, broken) {
+		if atomic.CompareAndSwapPointer(&s.data[i * 2], nil, broken) {
 			return broken
 		} else {
-			return atomic.LoadPointer(&s.conts[i])
+			return atomic.LoadPointer(&s.data[i * 2])
 		}
 	} else {
 		return cont
@@ -318,18 +315,18 @@ func (c *LFChan) regSelectForSend(selectInstance *SelectInstance, element unsafe
 			enqIdx := senders
 			tail = c.getTail(nodeId(enqIdx), tail)
 			i := indexInNode(enqIdx)
-			tail.elements[i] = element
+			tail.data[i*2+1] = element
 			if senders-receivers <= c.capacity { // do not suspend
 				if tail.casContinuation(i, nil, _element) {
 					return false, RegInfo{}
 				} else {
-					tail.elements[i] = nil
+					tail.data[i*2+1] = nil
 					continue
 				}
 			} else { // suspend
 				if !tail.casContinuation(i, nil, unsafe.Pointer(selectInstance)) {
 					// the cell is broken
-					tail.elements[i] = nil
+					tail.data[i*2+1] = nil
 					continue
 				}
 				return true, RegInfo{tail, i}
@@ -355,6 +352,7 @@ func (c *LFChan) regSelectForReceive(selectInstance *SelectInstance) (added bool
 			i := indexInNode(enqIdx)
 			if !tail.casContinuation(i, nil, unsafe.Pointer(selectInstance)) {
 				// the cell is broken
+				tail.data[i*2+1] = nil
 				continue
 			}
 			return true, RegInfo{tail, i}
@@ -369,8 +367,8 @@ func (s *segment) clean(index uint32) {
 	//cont := s.readContinuation(index)
 	//if cont == broken { return }
 	//if !s.casContinuation(index, cont, broken) { return }
-	s.conts[index] = broken
-	s.elements[index] = nil
+	s.data[index * 2] = broken
+	s.data[index * 2 + 1] = nil
 	if atomic.AddUint32(&s._cleaned, 1) < segmentSize { return }
 	// Remove the segment
 	s.remove()
