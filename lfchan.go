@@ -71,7 +71,7 @@ func (c *LFChan) Send(element unsafe.Pointer) {
 		tail := c.tail()
 		senders, receivers := c.counters.incSendersAndGetSnapshot()
 		if senders <= receivers {
-			if c.tryResume(head, senders, element, nil) != fail { return }
+			if c.tryResumeSimpleSend(head, senders, element) { return }
 		} else {
 			if c.trySuspendAndReturn(tail, senders, element, senders - receivers > c.capacity) != fail { return }
 		}
@@ -84,7 +84,7 @@ func (c *LFChan) Receive() unsafe.Pointer {
 		tail := c.tail()
 		senders, receivers := c.counters.incReceiversAndGetSnapshot()
 		if receivers <= senders {
-			result := c.tryResume(head, receivers, ReceiverElement, nil)
+			result := c.tryResumeSimpleReceive(head, receivers)
 			if result != fail {
 				return result
 			}
@@ -93,6 +93,51 @@ func (c *LFChan) Receive() unsafe.Pointer {
 			if result != fail {
 				return result
 			}
+		}
+	}
+}
+
+func (c *LFChan) tryResumeSimpleSend(head *segment, deqIdx uint64, element unsafe.Pointer) bool {
+	head = c.getHead(nodeId(deqIdx), head)
+	i := indexInNode(deqIdx)
+	cont := head.readContinuation(i)
+
+	if cont == broken { return false }
+
+	if IntType(cont) != SelectInstanceType {
+		runtime.SetGParam(cont, element)
+		runtime.UnparkUnsafe(cont)
+		return true
+	} else {
+		selectInstance := (*SelectInstance)(cont)
+		if selectInstance.trySelectSimple(c, element) {
+			return true
+		} else {
+			return false
+		}
+	}
+}
+
+func (c *LFChan) tryResumeSimpleReceive(head *segment, deqIdx uint64) unsafe.Pointer {
+	head = c.getHead(nodeId(deqIdx), head)
+	i := indexInNode(deqIdx)
+	cont := head.readContinuation(i)
+
+	elementToReturn := head.data[i * 2 + 1]
+	head.data[i * 2 + 1] = nil
+
+	if cont == broken { return fail }
+	if cont == _element { return elementToReturn }
+
+	if IntType(cont) != SelectInstanceType {
+		runtime.UnparkUnsafe(cont)
+		return elementToReturn
+	} else {
+		selectInstance := (*SelectInstance)(cont)
+		if selectInstance.trySelectSimple(c, ReceiverElement) {
+			return elementToReturn
+		} else {
+			return fail
 		}
 	}
 }
