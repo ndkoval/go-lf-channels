@@ -79,11 +79,3 @@ func (n *segment) casPrev(old, new unsafe.Pointer) bool {
 	return atomic.CompareAndSwapPointer(&n._prev, old, new)
 }
 
-// == counters ==
-func (c *counters) h() uint64 {
-	return atomic.LoadUint64(&c.highest)
-}
-
-func (c *counters) l() uint64 {
-	return atomic.LoadUint64(&c.lowest)
-}
