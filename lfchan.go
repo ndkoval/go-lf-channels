@@ -16,9 +16,9 @@ const LFChanType int32 = 1094645093
 type LFChan struct {
 	__type 	     int32
 	capacity uint64
-	counters counters
 	_head    unsafe.Pointer
 	_tail    unsafe.Pointer
+	counters counters
 }
 
 func NewLFChan(capacity uint64) *LFChan {

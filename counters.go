@@ -4,8 +4,8 @@ import "sync/atomic"
 
 type counters struct {
 	lock    uint32
-	lowest  uint64
 	highest uint64
+	lowest  uint64
 }
 
 const _counterOffset = 32 // 32
@@ -85,23 +85,6 @@ func (c *counters) incReceiversAndGetSnapshot() (senders uint64, receivers uint6
 	}
 
 	// == STEP 5. Return the snapshot
-	return countCounters(l, h)
-}
-
-func (c *counters) incSendersAndGetSnapshot0() (senders uint64, receivers uint64) {
-	return c.incAndGetSnapshot(_counterOffset)
-}
-
-func (c *counters) incReceiversAndGetSnapshot0() (senders uint64, receivers uint64) {
-	return c.incAndGetSnapshot(0)
-}
-
-func (c *counters) incAndGetSnapshot(counterOffset uint32) (senders uint64, receivers uint64) {
-	c.acquireReadLock()
-	l := atomic.AddUint64(&c.lowest, 1 << counterOffset)
-	h := c.highest
-	c.releaseReadLock()
-	c.fixOverflow(counterOffset, l, counterPart(h, counterOffset))
 	return countCounters(l, h)
 }
 
