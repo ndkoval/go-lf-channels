@@ -1,6 +1,10 @@
 package main
 
-import "sync/atomic"
+import (
+	"github.com/intel-go/cpuid"
+	"github.com/0xmjk/go-tsx-rtm"
+	"sync/atomic"
+)
 
 //type counters struct {
 //	lock    uint32
@@ -40,7 +44,22 @@ func (c *LFChan) releaseWriteLock() {
 	atomic.AddUint32(&c.lock, ^uint32(_wLocked - 1))
 }
 
+func CpuHasRTM() bool {
+	return cpuid.HasExtendedFeature(cpuid.RTM)
+}
+
 func (c *LFChan) incSendersAndGetSnapshot() (senders uint64, receivers uint64) {
+	if CpuHasRTM() && rtm.TxBegin() == rtm.TxBeginStarted {
+		l := c.lowest + 1 << _counterOffset
+		c.lowest = l
+		h := c.highest
+		rtm.TxEnd()
+		if (l >> _counterOffset) > _minOverflowedValue {
+			c.fixOverflow(_counterOffset, l, counterPart(h, _counterOffset))
+		}
+		senders, receivers = countCounters(l, h)
+		return
+	}
 	// == STEP 1. Acquire the read lock ==
 	// Increment the number of readers
 	lock := atomic.AddUint32(&c.lock, 1)
@@ -65,6 +84,17 @@ func (c *LFChan) incSendersAndGetSnapshot() (senders uint64, receivers uint64) {
 }
 
 func (c *LFChan) incReceiversAndGetSnapshot() (senders uint64, receivers uint64) {
+	if CpuHasRTM() && rtm.TxBegin() == rtm.TxBeginStarted {
+		l := c.lowest + 1
+		c.lowest = l
+		h := c.highest
+		rtm.TxEnd()
+		if (l & _counterMask) > _minOverflowedValue {
+			c.fixOverflow(0, l, counterPart(h, 0))
+		}
+		senders, receivers = countCounters(l, h)
+		return
+	}
 	// == STEP 1. Acquire the read lock ==
 	// Increment the number of readers
 	lock := atomic.AddUint32(&c.lock, 1)
