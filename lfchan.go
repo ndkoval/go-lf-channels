@@ -103,7 +103,7 @@ func (c *LFChan) Receive() unsafe.Pointer {
 func (c *LFChan) tryResumeSimpleSend(head *segment, deqIdx uint64, element unsafe.Pointer) bool {
 	head = c.getHead(nodeId(deqIdx), head)
 	i := indexInNode(deqIdx)
-	cont := head.readContinuation(i, element)
+	cont := head.readContinuationSend(i, element)
 
 	if cont == element { return true}
 
@@ -124,7 +124,7 @@ func (c *LFChan) tryResumeSimpleSend(head *segment, deqIdx uint64, element unsaf
 func (c *LFChan) tryResumeSimpleReceive(head *segment, deqIdx uint64) unsafe.Pointer {
 	head = c.getHead(nodeId(deqIdx), head)
 	i := indexInNode(deqIdx)
-	cont := head.readContinuation(i, broken)
+	cont := head.readContinuation(i)
 
 	if cont == broken { return fail }
 	if cont == _element {
@@ -222,11 +222,24 @@ func (c *LFChan) findOrCreateNode(id uint64, cur *segment) *segment {
 	return cur
 }
 
-func (s *segment) readContinuation(i uint32, replaceWith unsafe.Pointer) unsafe.Pointer {
+func (s *segment) readContinuationSend(i uint32, replaceWith unsafe.Pointer) unsafe.Pointer {
 	cont := atomic.LoadPointer(&s.data[i * 2])
 	if cont == nil {
 		if atomic.CompareAndSwapPointer(&s.data[i * 2], nil, replaceWith) {
 			return replaceWith
+		} else {
+			return atomic.LoadPointer(&s.data[i * 2])
+		}
+	} else {
+		return cont
+	}
+}
+
+func (s *segment) readContinuation(i uint32) unsafe.Pointer {
+	cont := atomic.LoadPointer(&s.data[i * 2])
+	if cont == nil {
+		if atomic.CompareAndSwapPointer(&s.data[i * 2], nil, broken) {
+			return broken
 		} else {
 			return atomic.LoadPointer(&s.data[i * 2])
 		}
