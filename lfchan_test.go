@@ -1,8 +1,8 @@
 package main
 
 import (
-	"testing"
 	"sync"
+	"testing"
 	"unsafe"
 )
 
@@ -220,18 +220,18 @@ func TestStressSelects(t *testing.T) {
 }
 
 
-func testStressSelectsOver2Channels(t *testing.T) {
-	n := 50000
+func TestStressSelectsOver2Channels(t *testing.T) {
+	n := 100000
 	k := 10
 	c1 := NewLFChan(capacity)
 	c2 := NewLFChan(capacity)
 	wg := sync.WaitGroup{}
 	// Run sender
-	//for sender := 0; sender < k; sender++ {
+	for sender := 0; sender < k; sender++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for i := 0; i < n * k; i++ {
+			for i := 0; i < n; i++ {
 				SelectUnbiased(
 					SelectAlternative{
 						channel: c1,
@@ -246,7 +246,7 @@ func testStressSelectsOver2Channels(t *testing.T) {
 				)
 			}
 		}()
-	//}
+	}
 	// Run receiver
 	for receiver := 0; receiver < k; receiver++ {
 		wg.Add(1)

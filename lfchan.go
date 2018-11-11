@@ -12,7 +12,9 @@ var _element = (unsafe.Pointer) ((uintptr) (3))
 
 // == Channel structure ==
 
+const LFChanType int32 = 1094645093
 type LFChan struct {
+	__type 	     int32
 	capacity uint64
 	counters counters
 	_head    unsafe.Pointer
@@ -22,6 +24,7 @@ type LFChan struct {
 func NewLFChan(capacity uint64) *LFChan {
 	node := unsafe.Pointer(newNode(0, nil))
 	return &LFChan{
+		__type: LFChanType,
 		capacity: capacity,
 		counters: counters{},
 		_head:    node,
@@ -68,7 +71,7 @@ func (c *LFChan) Send(element unsafe.Pointer) {
 		tail := c.tail()
 		senders, receivers := c.counters.incSendersAndGetSnapshot()
 		if senders <= receivers {
-			if c.tryResume(head, senders, element) != fail { return }
+			if c.tryResume(head, senders, element, nil) != fail { return }
 		} else {
 			if c.trySuspendAndReturn(tail, senders, element, senders - receivers > c.capacity) != fail { return }
 		}
@@ -81,7 +84,7 @@ func (c *LFChan) Receive() unsafe.Pointer {
 		tail := c.tail()
 		senders, receivers := c.counters.incReceiversAndGetSnapshot()
 		if receivers <= senders {
-			result := c.tryResume(head, receivers, ReceiverElement)
+			result := c.tryResume(head, receivers, ReceiverElement, nil)
 			if result != fail {
 				return result
 			}
@@ -94,7 +97,7 @@ func (c *LFChan) Receive() unsafe.Pointer {
 	}
 }
 
-func (c *LFChan) tryResume(head *segment, deqIdx uint64, element unsafe.Pointer) unsafe.Pointer {
+func (c *LFChan) tryResume(head *segment, deqIdx uint64, element unsafe.Pointer, thisSelectInstance *SelectInstance) unsafe.Pointer {
 	head = c.getHead(nodeId(deqIdx), head)
 	i := indexInNode(deqIdx)
 	cont := head.readContinuation(i)
@@ -107,15 +110,19 @@ func (c *LFChan) tryResume(head *segment, deqIdx uint64, element unsafe.Pointer)
 
 	if IntType(cont) == SelectInstanceType {
 		selectInstance := (*SelectInstance) (cont)
-		selected, non_suspended := selectInstance.trySetState(unsafe.Pointer(c), false)
-		if !selected { return fail }
-		if non_suspended {
-			atomic.StorePointer(&selectInstance.result, element)
+		if thisSelectInstance == nil {
+			if selectInstance.trySelectSimple(c, element) {
+				return elementToReturn
+			} else {
+				return fail
+			}
 		} else {
-			runtime.SetGParam(selectInstance.gp, element)
-			runtime.UnparkUnsafe(selectInstance.gp)
+			if selectInstance.trySelectFromSelect(thisSelectInstance, unsafe.Pointer(c), element) {
+				return elementToReturn
+			} else {
+				return fail
+			}
 		}
-		return elementToReturn
 	} else {
 		runtime.SetGParam(cont, element)
 		runtime.UnparkUnsafe(cont)
@@ -209,9 +216,8 @@ func (c *LFChan) regSelectForSend(selectInstance *SelectInstance, element unsafe
 		tail := c.tail()
 		senders, receivers := c.counters.incSendersAndGetSnapshot()
 		if senders <= receivers {
-			if c.tryResume(head, senders, element) != fail {
-				selectInstance.trySetState(unsafe.Pointer(c), true)
-				selectInstance.result = ReceiverElement
+			if c.tryResume(head, senders, element, selectInstance) != fail {
+				runtime.SetGParam(selectInstance.gp, ReceiverElement)
 				return false, RegInfo{}
 			}
 		} else {
@@ -221,8 +227,6 @@ func (c *LFChan) regSelectForSend(selectInstance *SelectInstance, element unsafe
 			tail.data[i*2+1] = element
 			if senders-receivers <= c.capacity { // do not suspend
 				if tail.casContinuation(i, nil, _element) {
-					selectInstance.trySetState(unsafe.Pointer(c), true)
-					selectInstance.result = ReceiverElement
 					return false, RegInfo{}
 				} else {
 					tail.data[i*2+1] = nil
@@ -246,10 +250,9 @@ func (c *LFChan) regSelectForReceive(selectInstance *SelectInstance) (added bool
 		tail := c.tail()
 		senders, receivers := c.counters.incReceiversAndGetSnapshot()
 		if receivers <= senders {
-			result := c.tryResume(head, receivers, ReceiverElement)
+			result := c.tryResume(head, receivers, ReceiverElement, selectInstance)
 			if result != fail {
-				selectInstance.trySetState(unsafe.Pointer(c), true)
-				selectInstance.result = result
+				runtime.SetGParam(selectInstance.gp, result)
 				return false, RegInfo{}
 			}
 		} else {

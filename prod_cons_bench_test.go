@@ -15,16 +15,16 @@ import (
 
 const capacity = 0
 const newAlgo = true
-const useProfiler = false
+const useProfiler = true
 const approxBatchSize = 100000
 
 var parallelism = []int{1, 2, 4, 8, 16, 32, 64, 128, 144} // number of scheduler threads
-var goroutines = []int{0, 10000} // 0 -- number of scheduler threads
+var goroutines = []int{0, 1000} // 0 -- number of scheduler threads
 var work = []int{100} // an additional work size (parameter for `consumeCPU`) for each operation
 
 // Multiple producer single consumer
 func BenchmarkN1(b *testing.B) {
-	for _, withSelect := range [...]bool{true} {
+	for _, withSelect := range [...]bool{false, true} {
 		for _, work := range work {
 			for _, parallelism := range parallelism {
 				consumers := 1
@@ -43,7 +43,7 @@ func BenchmarkN1(b *testing.B) {
 
 // Multiple producer multiple consumer
 func BenchmarkNN(b *testing.B) {
-	for _, withSelect := range [...]bool{true} {
+	for _, withSelect := range [...]bool{false, true} {
 		for _, work := range work {
 			for _, goroutines := range goroutines {
 				for _, parallelism := range parallelism {

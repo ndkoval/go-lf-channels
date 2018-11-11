@@ -45,6 +45,10 @@ func (s *SelectInstance) getState() unsafe.Pointer {
 	return atomic.LoadPointer(&s.state)
 }
 
+func (s *SelectInstance) setState(newState unsafe.Pointer) {
+	atomic.StorePointer(&s.state, newState)
+}
+
 func (s *SelectInstance) casState(old, new unsafe.Pointer) bool {
 	return atomic.CompareAndSwapPointer(&s.state, old, new)
 }

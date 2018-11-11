@@ -32,10 +32,11 @@ func shuffleAlternatives(alts []SelectAlternative) []SelectAlternative {
 }
 
 func SelectImpl(alternatives []SelectAlternative) {
-	id := nextSelectInstanceId()
 	selectInstance := &SelectInstance {
 		__type: SelectInstanceType,
-		id: id,
+		id: nextSelectInstanceId(),
+		state: state_registering,
+		gp: runtime.GetGoroutine(),
 	}
 	selectInstance.doSelect(alternatives)
 }
@@ -51,57 +52,126 @@ func (s *SelectInstance) doSelect(alternatives []SelectAlternative) {
 	alternative.action(result)
 }
 
-func (s *SelectInstance) trySetState(channel unsafe.Pointer, insideRegistration bool) (bool, bool) {
+func (s *SelectInstance) trySelectFromSelect(selectFrom *SelectInstance, channel unsafe.Pointer, element unsafe.Pointer) bool {
 	state := s.getState()
-	if insideRegistration {
-		atomic.StorePointer(&s.state, channel)
-		return true, false
-	} else {
-		if state == state_registering {
-			if s.casState(state_registering, channel) {
-				for {
-					state = s.getState()
-					if state != channel { break }
-					runtime.Gosched()
-				}
-				if state == state_finished { return true, true }
-			} else {
+	if state == state_registering {
+		if s.casState(state_registering, unsafe.Pointer(selectFrom)) {
+			for {
 				state = s.getState()
+				if state != unsafe.Pointer(selectFrom) { break }
+				if shouldConfirm(selectFrom, selectFrom, selectFrom.id) {
+					selectFrom.setState(state_confirmed)
+					selectFrom.confirmedAlready = true
+				}
 			}
+			if state == state_confirmed || selectFrom.confirmedAlready {
+				runtime.SetGParam(s.gp, element)
+				s.setState(channel)
+				return true
+			}
+		} else {
+			state = s.getState()
 		}
-		if state != state_waiting { return false, false }
-		return s.casState(state_waiting, channel), false
 	}
+	if state == state_waiting {
+		if !s.casState(state_waiting, channel) { return false }
+		runtime.SetGParam(s.gp, element)
+		runtime.UnparkUnsafe(s.gp)
+		return true
+	} else {
+		return false // already selected
+	}
+}
+
+func (s *SelectInstance) trySelectSimple(channel *LFChan, element unsafe.Pointer) bool {
+	state := s.getState()
+	if state == state_registering {
+		if s.casState(state, unsafe.Pointer(channel)) {
+			for {
+				state = s.getState()
+				if state != unsafe.Pointer(channel) { break }
+			}
+			if state == state_confirmed {
+				runtime.SetGParam(s.gp, element)
+				s.setState(state_done)
+				return true
+			}
+		} else {
+			state = s.getState()
+		}
+	}
+	if state == state_waiting {
+		if !s.casState(state, unsafe.Pointer(channel)) { return false }
+		runtime.SetGParam(s.gp, element)
+		runtime.UnparkUnsafe(s.gp)
+		return true
+	} else {
+		return false // already selected
+	}
+}
+
+func shouldConfirm(start *SelectInstance, cur *SelectInstance, min uint64) bool {
+	curState := cur.state
+	if curState == state_registering || curState == state_waiting || curState == state_confirmed || curState == state_done {
+		return false
+	}
+
+	curStateType := IntType(curState)
+	if curStateType != SelectInstanceType {
+		return false
+	}
+
+	next := (*SelectInstance) (curState)
+	if next.id < min { min = next.id }
+	if next == start {
+		return min == start.id
+	}
+	return shouldConfirm(start, next, min)
 }
 
 func (s *SelectInstance) selectAlternative(alternatives []SelectAlternative) (result unsafe.Pointer, alternative SelectAlternative, reginfos [2]RegInfo) {
 	reginfos = [2]RegInfo{}
 	for i, alt := range alternatives {
-		if s.getState() != state_registering {
-			channel := (*LFChan) (s.state)
-			atomic.StorePointer(&s.state, state_finished)
-
-			result = atomic.LoadPointer(&s.result)
-			for result == nil { result = atomic.LoadPointer(&s.result) }
-			s.result = nil
-
-			alternative = s.findAlternative(channel, alternatives)
-			return
+		state := s.getState()
+		if state != state_registering {
+			stateType := IntType(state)
+			if stateType == SelectInstanceType {
+				s.setState(state_confirmed)
+				state = state_confirmed
+				for {
+					state = s.getState()
+					if state != state_confirmed { break }
+				}
+				channel := (*LFChan) (state)
+				result = runtime.GetGParam(s.gp)
+				runtime.SetGParam(s.gp, nil)
+				alternative = s.findAlternative(channel, alternatives)
+				return
+			} else {
+				channel := (*LFChan) (state)
+				s.setState(state_confirmed)
+				for s.getState() != state_done {}
+				result = runtime.GetGParam(s.gp)
+				runtime.SetGParam(s.gp, nil)
+				alternative = s.findAlternative(channel, alternatives)
+				return
+			}
 		}
 		added, regInfo := alt.channel.regSelect(s, alt.element)
 		if added {
 			reginfos[i] = regInfo
 		} else {
+			s.setState(state_done)
 			alternative = alt
-			result = s.result
-			s.result = nil
+			result = runtime.GetGParam(s.gp)
+			runtime.SetGParam(s.gp, nil)
 			return
 		}
 	}
-	s.gp = runtime.GetGoroutine()
 	atomic.StorePointer(&s.state, state_waiting)
 	runtime.ParkUnsafe(s.gp)
 	result = runtime.GetGParam(s.gp)
+	runtime.SetGParam(s.gp, nil)
 	channel := (*LFChan) (s.state)
 	alternative = s.findAlternative(channel, alternatives)
 	return
@@ -134,17 +204,18 @@ func nextSelectInstanceId() uint64 {
 	return atomic.AddUint64(&_nextSelectInstanceId, 1)
 }
 
-const SelectInstanceType int32 = 1298498092
+const SelectInstanceType int32 = 1098498093
 type SelectInstance struct {
 	__type 	     int32
 	id 	         uint64
 	state 	     unsafe.Pointer
 	gp           unsafe.Pointer // goroutine
-	result		 unsafe.Pointer
+	confirmedAlready bool
 }
-var state_registering = unsafe.Pointer(nil)
+var state_registering = unsafe.Pointer(uintptr(0))
 var state_waiting = unsafe.Pointer(uintptr(1))
-var state_finished = unsafe.Pointer(uintptr(2))
+var state_confirmed = unsafe.Pointer(uintptr(2))
+var state_done = unsafe.Pointer(uintptr(3))
 
 type RegInfo struct {
 	segment *segment
