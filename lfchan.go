@@ -16,9 +16,12 @@ const LFChanType int32 = 1094645093
 type LFChan struct {
 	__type 	     int32
 	capacity uint64
+	lock    uint32
+	highest uint64
+	lowest  uint64
 	_head    unsafe.Pointer
 	_tail    unsafe.Pointer
-	counters counters
+	//counters counters
 }
 
 func NewLFChan(capacity uint64) *LFChan {
@@ -26,7 +29,7 @@ func NewLFChan(capacity uint64) *LFChan {
 	return &LFChan{
 		__type: LFChanType,
 		capacity: capacity,
-		counters: counters{},
+		//counters: counters{},
 		_head:    node,
 		_tail:    node,
 	}
@@ -72,7 +75,7 @@ func (c *LFChan) Send(element unsafe.Pointer) {
 	for {
 		head := c.head()
 		tail := c.tail()
-		senders, receivers := c.counters.incSendersAndGetSnapshot()
+		senders, receivers := c.incSendersAndGetSnapshot()
 		if senders <= receivers {
 			if c.tryResumeSimpleSend(head, senders, element) { return }
 		} else {
@@ -85,7 +88,7 @@ func (c *LFChan) Receive() unsafe.Pointer {
 	for {
 		head := c.head()
 		tail := c.tail()
-		senders, receivers := c.counters.incReceiversAndGetSnapshot()
+		senders, receivers := c.incReceiversAndGetSnapshot()
 		if receivers <= senders {
 			result := c.tryResumeSimpleReceive(head, receivers)
 			if result != fail {
@@ -305,7 +308,7 @@ func (c *LFChan) regSelectForSend(selectInstance *SelectInstance, element unsafe
 	for {
 		head := c.head()
 		tail := c.tail()
-		senders, receivers := c.counters.incSendersAndGetSnapshot()
+		senders, receivers := c.incSendersAndGetSnapshot()
 		if senders <= receivers {
 			if c.tryResume(head, senders, element, selectInstance) != fail {
 				runtime.SetGParam(selectInstance.gp, ReceiverElement)
@@ -339,7 +342,7 @@ func (c *LFChan) regSelectForReceive(selectInstance *SelectInstance) (added bool
 	for {
 		head := c.head()
 		tail := c.tail()
-		senders, receivers := c.counters.incReceiversAndGetSnapshot()
+		senders, receivers := c.incReceiversAndGetSnapshot()
 		if receivers <= senders {
 			result := c.tryResume(head, receivers, ReceiverElement, selectInstance)
 			if result != fail {

@@ -2,11 +2,11 @@ package main
 
 import "sync/atomic"
 
-type counters struct {
-	lock    uint32
-	highest uint64
-	lowest  uint64
-}
+//type counters struct {
+//	lock    uint32
+//	highest uint64
+//	lowest  uint64
+//}
 
 const _counterOffset = 32 // 32
 const _counterMask = (1 << _counterOffset) - 1
@@ -15,19 +15,19 @@ const _minOverflowedValue = 1 << (_counterOffset - 1)
 // if the `lock` field is equals or greater than this value, the write lock is acquired.
 const _wLocked = 1 << 30
 
-func (c *counters) acquireReadLock() {
+func (c *LFChan) acquireReadLock() {
 	// Increment the number of readers
 	lock := atomic.AddUint32(&c.lock, 1)
 	// Wait until write lock is released. It can't be acquired again until we decrement the number of readers.
 	for lock > _wLocked { lock = atomic.LoadUint32(&c.lock) }
 }
 
-func (c *counters) releaseReadLock() {
+func (c *LFChan) releaseReadLock() {
 	// Decrement the number of readers
 	atomic.AddUint32(&c.lock, ^uint32(0))
 }
 
-func (c *counters) tryAcquireWriteLock() bool {
+func (c *LFChan) tryAcquireWriteLock() bool {
 	// Check if no readers holds the lock
 	if atomic.LoadUint32(&c.lock) != 0 { return false }
 	// Acquire the write lock if no readers holds it. This strategy is very unfair, but the write lock is used for
@@ -35,12 +35,12 @@ func (c *counters) tryAcquireWriteLock() bool {
 	return atomic.CompareAndSwapUint32(&c.lock, 0, _wLocked)
 }
 
-func (c *counters) releaseWriteLock() {
+func (c *LFChan) releaseWriteLock() {
 	// Decrement the `lock` field by `_wLocked`
 	atomic.AddUint32(&c.lock, ^uint32(_wLocked - 1))
 }
 
-func (c *counters) incSendersAndGetSnapshot() (senders uint64, receivers uint64) {
+func (c *LFChan) incSendersAndGetSnapshot() (senders uint64, receivers uint64) {
 	// == STEP 1. Acquire the read lock ==
 	// Increment the number of readers
 	lock := atomic.AddUint32(&c.lock, 1)
@@ -64,7 +64,7 @@ func (c *counters) incSendersAndGetSnapshot() (senders uint64, receivers uint64)
 	return countCounters(l, h)
 }
 
-func (c *counters) incReceiversAndGetSnapshot() (senders uint64, receivers uint64) {
+func (c *LFChan) incReceiversAndGetSnapshot() (senders uint64, receivers uint64) {
 	// == STEP 1. Acquire the read lock ==
 	// Increment the number of readers
 	lock := atomic.AddUint32(&c.lock, 1)
@@ -88,7 +88,7 @@ func (c *counters) incReceiversAndGetSnapshot() (senders uint64, receivers uint6
 	return countCounters(l, h)
 }
 
-func (c *counters) fixOverflow(counterOffset uint32, curLowest uint64, curHighestPart uint64) {
+func (c *LFChan) fixOverflow(counterOffset uint32, curLowest uint64, curHighestPart uint64) {
 	//if counterPart(curLowest, counterOffset) < _minOverflowedValue { return }
 	for {
 		if c.tryAcquireWriteLock() {
