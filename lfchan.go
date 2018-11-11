@@ -103,9 +103,9 @@ func (c *LFChan) Receive() unsafe.Pointer {
 func (c *LFChan) tryResumeSimpleSend(head *segment, deqIdx uint64, element unsafe.Pointer) bool {
 	head = c.getHead(nodeId(deqIdx), head)
 	i := indexInNode(deqIdx)
-	cont := head.readContinuation(i, element)
+	cont := head.readContinuation(i)
 
-	if cont == element { return true}
+	if cont == broken { return false }
 
 	if IntType(cont) != SelectInstanceType {
 		runtime.SetGParam(cont, element)
@@ -124,7 +124,7 @@ func (c *LFChan) tryResumeSimpleSend(head *segment, deqIdx uint64, element unsaf
 func (c *LFChan) tryResumeSimpleReceive(head *segment, deqIdx uint64) unsafe.Pointer {
 	head = c.getHead(nodeId(deqIdx), head)
 	i := indexInNode(deqIdx)
-	cont := head.readContinuation(i, broken)
+	cont := head.readContinuation(i)
 
 	if cont == broken { return fail }
 	if cont == _element {
@@ -149,15 +149,47 @@ func (c *LFChan) tryResumeSimpleReceive(head *segment, deqIdx uint64) unsafe.Poi
 	}
 }
 
+func (c *LFChan) tryResume(head *segment, deqIdx uint64, element unsafe.Pointer, thisSelectInstance *SelectInstance) unsafe.Pointer {
+	head = c.getHead(nodeId(deqIdx), head)
+	i := indexInNode(deqIdx)
+	cont := head.readContinuation(i)
+
+	elementToReturn := head.data[i * 2 + 1]
+	head.data[i * 2 + 1] = nil
+
+	if cont == broken { return fail }
+	if cont == _element { return elementToReturn }
+
+	if IntType(cont) == SelectInstanceType {
+		selectInstance := (*SelectInstance) (cont)
+		if thisSelectInstance == nil {
+			if selectInstance.trySelectSimple(c, element) {
+				return elementToReturn
+			} else {
+				return fail
+			}
+		} else {
+			if selectInstance.trySelectFromSelect(thisSelectInstance, unsafe.Pointer(c), element) {
+				return elementToReturn
+			} else {
+				return fail
+			}
+		}
+	} else {
+		elementToReturn = runtime.GetGParam(cont)
+		runtime.SetGParam(cont, element)
+		runtime.UnparkUnsafe(cont)
+		return elementToReturn
+	}
+}
+
 func (c *LFChan) trySuspendAndReturnReceive(tail *segment, enqIdx uint64) unsafe.Pointer {
 	tail = c.getTail(nodeId(enqIdx), tail)
 	i := indexInNode(enqIdx)
 	curG := runtime.GetGoroutine()
 	if !tail.casContinuation(i, nil, curG) {
 		// the cell is broken
-		result := tail.data[i * 2]
-		tail.data[i * 2] = nil
-		return result
+		return fail
 	}
 	runtime.ParkUnsafe(curG)
 	result := runtime.GetGParam(curG)
@@ -189,7 +221,30 @@ func (c *LFChan) trySuspendAndReturnSend(tail *segment, enqIdx uint64, element u
 	}
 }
 
-// == cell storage ==
+func (c *LFChan) trySuspendAndReturn(tail *segment, enqIdx uint64, element unsafe.Pointer, suspend bool) unsafe.Pointer {
+	tail = c.getTail(nodeId(enqIdx), tail)
+	i := indexInNode(enqIdx)
+	tail.data[i * 2 + 1] = element
+	if suspend {
+		curG := runtime.GetGoroutine()
+		if !tail.casContinuation(i, nil, curG) {
+			// the cell is broken
+			tail.data[i * 2 + 1] = nil
+			return fail
+		}
+		runtime.ParkUnsafe(curG)
+		result := runtime.GetGParam(curG)
+		runtime.SetGParam(curG, nil)
+		return result
+	} else { // buffering
+		if tail.casContinuation(i, nil, _element) {
+			return nil
+		} else {
+			tail.data[i * 2 + 1] = nil
+			return fail
+		}
+	}
+}
 
 func (c *LFChan) getHead(id uint64, cur *segment) *segment {
 	if cur.id == id { return cur }
@@ -222,11 +277,11 @@ func (c *LFChan) findOrCreateNode(id uint64, cur *segment) *segment {
 	return cur
 }
 
-func (s *segment) readContinuation(i uint32, replaceWith unsafe.Pointer) unsafe.Pointer {
+func (s *segment) readContinuation(i uint32) unsafe.Pointer {
 	cont := atomic.LoadPointer(&s.data[i * 2])
 	if cont == nil {
-		if atomic.CompareAndSwapPointer(&s.data[i * 2], nil, replaceWith) {
-			return replaceWith
+		if atomic.CompareAndSwapPointer(&s.data[i * 2], nil, broken) {
+			return broken
 		} else {
 			return atomic.LoadPointer(&s.data[i * 2])
 		}
@@ -237,40 +292,6 @@ func (s *segment) readContinuation(i uint32, replaceWith unsafe.Pointer) unsafe.
 
 
 // === SELECT ===
-
-func (c *LFChan) tryResume(head *segment, deqIdx uint64, element unsafe.Pointer, thisSelectInstance *SelectInstance) unsafe.Pointer {
-	head = c.getHead(nodeId(deqIdx), head)
-	i := indexInNode(deqIdx)
-	cont := head.readContinuation(i, broken)
-
-	elementToReturn := head.data[i * 2 + 1]
-	head.data[i * 2 + 1] = nil
-
-	if cont == broken { return fail }
-	if cont == _element { return elementToReturn }
-
-	if IntType(cont) == SelectInstanceType {
-		selectInstance := (*SelectInstance) (cont)
-		if thisSelectInstance == nil {
-			if selectInstance.trySelectSimple(c, element) {
-				return elementToReturn
-			} else {
-				return fail
-			}
-		} else {
-			if selectInstance.trySelectFromSelect(thisSelectInstance, unsafe.Pointer(c), element) {
-				return elementToReturn
-			} else {
-				return fail
-			}
-		}
-	} else {
-		elementToReturn = runtime.GetGParam(cont)
-		runtime.SetGParam(cont, element)
-		runtime.UnparkUnsafe(cont)
-		return elementToReturn
-	}
-}
 
 func (c *LFChan) regSelect(selectInstance *SelectInstance, element unsafe.Pointer) (bool, RegInfo) {
 	if element == ReceiverElement {

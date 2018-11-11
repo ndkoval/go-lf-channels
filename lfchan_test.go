@@ -17,7 +17,7 @@ func TestSimple(t *testing.T) {
 	if x != 10 { t.Fatal("Expected ", 10, ", found ", x) }
 }
 
-func testSimpleSendAndReceiveWithSelect(t *testing.T) {
+func TestSimpleSendAndReceiveWithSelect(t *testing.T) {
 	c1 := NewLFChan(capacity)
 	dummy := NewLFChan(capacity)
 	N := 1000
@@ -49,7 +49,7 @@ func testSimpleSendAndReceiveWithSelect(t *testing.T) {
 	}
 }
 
-func testSimpleSelects(t *testing.T) {
+func TestSimpleSelects(t *testing.T) {
 	c1 := NewLFChan(capacity)
 	c2 := NewLFChan(capacity)
 	N := 1000
@@ -123,7 +123,7 @@ func TestStress(t *testing.T) {
 	wg.Wait()
 }
 
-func testStressWithSelectOnReceive(t *testing.T) { // TODO
+func TestStressWithSelectOnReceive(t *testing.T) { // TODO
 	n := 500000
 	k := 1
 	c := NewLFChan(capacity)
@@ -168,7 +168,7 @@ func testStressWithSelectOnReceive(t *testing.T) { // TODO
 	wg.Wait()
 }
 
-func testStressSelects(t *testing.T) {
+func TestStressSelects(t *testing.T) {
 	n := 500000
 	k := 3
 	c := NewLFChan(capacity)
@@ -220,7 +220,7 @@ func testStressSelects(t *testing.T) {
 }
 
 
-func testStressSelectsOver2Channels(t *testing.T) {
+func TestStressSelectsOver2Channels(t *testing.T) {
 	n := 100000
 	k := 10
 	c1 := NewLFChan(capacity)
