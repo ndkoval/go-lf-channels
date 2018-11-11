@@ -59,16 +59,8 @@ func IntType(p unsafe.Pointer) int32 {
 
 // == segment ==
 
-func (n *segment) casElement(index uint32, old, new unsafe.Pointer) bool {
-	return atomic.CompareAndSwapPointer(&n.data[index * 2 + 1], old, new)
-}
-
 func (n *segment) casContinuation(index uint32, old, new unsafe.Pointer) bool {
-	return atomic.CompareAndSwapPointer(&n.data[index * 2], old, new)
-}
-
-func (n *segment) setContinuation(index uint32, cont unsafe.Pointer) {
-	atomic.StorePointer(&n.data[index * 2], cont)
+	return atomic.CompareAndSwapPointer(&n.conts[index], old, new)
 }
 
 func (n *segment) next() *segment {

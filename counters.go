@@ -108,6 +108,7 @@ func counterPart(counters uint64, counterOffset uint32) uint64 {
 	return (counters >> counterOffset) & _counterMask
 }
 
+//go:nosplit
 func countCounters(lowest uint64, highest uint64) (senders uint64, receivers uint64) {
 	ls := lowest >> _counterOffset
 	lr := lowest & _counterMask
