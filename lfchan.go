@@ -89,7 +89,7 @@ func (c *LFChan) Receive() unsafe.Pointer {
 				return result
 			}
 		} else {
-			result := c.trySuspendAndReturn(tail, receivers, nil, true)
+			result := c.trySuspendAndReturnReceive(tail, receivers)
 			if result != fail {
 				return result
 			}
@@ -173,6 +173,20 @@ func (c *LFChan) tryResume(head *segment, deqIdx uint64, element unsafe.Pointer,
 		runtime.UnparkUnsafe(cont)
 		return elementToReturn
 	}
+}
+
+func (c *LFChan) trySuspendAndReturnReceive(tail *segment, enqIdx uint64) unsafe.Pointer {
+	tail = c.getTail(nodeId(enqIdx), tail)
+	i := indexInNode(enqIdx)
+	curG := runtime.GetGoroutine()
+	if !tail.casContinuation(i, nil, curG) {
+		// the cell is broken
+		return fail
+	}
+	runtime.ParkUnsafe(curG)
+	result := runtime.GetGParam(curG)
+	runtime.SetGParam(curG, nil)
+	return result
 }
 
 func (c *LFChan) trySuspendAndReturn(tail *segment, enqIdx uint64, element unsafe.Pointer, suspend bool) unsafe.Pointer {
