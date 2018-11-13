@@ -8,6 +8,8 @@ import (
 
 var broken = (unsafe.Pointer) ((uintptr) (1))
 var fail = (unsafe.Pointer) ((uintptr) (2))
+var confirmed = unsafe.Pointer(uintptr(3))
+
 
 // == Channel structure ==
 
@@ -139,39 +141,6 @@ func (c *LFChan) tryResumeSimpleReceive(head *segment, deqIdx uint64) unsafe.Poi
 	}
 }
 
-func (c *LFChan) tryResume(head *segment, deqIdx uint64, element unsafe.Pointer, thisSelectInstance *SelectInstance) unsafe.Pointer {
-	head = c.getHead(nodeId(deqIdx), head)
-	i := indexInNode(deqIdx)
-	cont := head.readContinuation(i)
-
-	elementToReturn := head.data[i * 2 + 1]
-	head.data[i * 2 + 1] = nil
-
-	if cont == broken { return fail }
-
-	if IntType(cont) == SelectInstanceType {
-		selectInstance := (*SelectInstance) (cont)
-		if thisSelectInstance == nil {
-			if selectInstance.trySelectSimple(c, element) {
-				return elementToReturn
-			} else {
-				return fail
-			}
-		} else {
-			if selectInstance.trySelectFromSelect(thisSelectInstance, unsafe.Pointer(c), element) {
-				return elementToReturn
-			} else {
-				return fail
-			}
-		}
-	} else {
-		elementToReturn = runtime.GetGParam(cont)
-		runtime.SetGParam(cont, element)
-		runtime.UnparkUnsafe(cont)
-		return elementToReturn
-	}
-}
-
 func (c *LFChan) trySuspendAndReturnReceive(tail *segment, enqIdx uint64) unsafe.Pointer {
 	tail = c.getTail(nodeId(enqIdx), tail)
 	i := indexInNode(enqIdx)
@@ -264,8 +233,12 @@ func (s *segment) readContinuation(i uint32) unsafe.Pointer {
 
 
 // === SELECT ===
+const reg_added = uint8(0)
+const reg_rendezvous = uint8(1)
+const reg_confirmed = uint8(2)
 
-func (c *LFChan) regSelect(selectInstance *SelectInstance, element unsafe.Pointer) (bool, RegInfo) {
+
+func (c *LFChan) regSelect(selectInstance *SelectInstance, element unsafe.Pointer) (uint8, RegInfo) {
 	if element == ReceiverElement {
 		return c.regSelectForReceive(selectInstance)
 	} else {
@@ -273,16 +246,16 @@ func (c *LFChan) regSelect(selectInstance *SelectInstance, element unsafe.Pointe
 	}
 }
 
-func (c *LFChan) regSelectForSend(selectInstance *SelectInstance, element unsafe.Pointer) (bool, RegInfo) {
+func (c *LFChan) regSelectForSend(selectInstance *SelectInstance, element unsafe.Pointer) (uint8, RegInfo) {
 	for {
 		head := c.head()
 		tail := c.tail()
 		senders, receivers := c.incSendersAndGetSnapshot()
 		if senders <= receivers {
-			if c.tryResume(head, senders, element, selectInstance) != fail {
-				runtime.SetGParam(selectInstance.gp, ReceiverElement)
-				return false, RegInfo{}
-			}
+			result := c.tryResumeSelect(head, senders, element, selectInstance)
+			if result == fail { continue }
+			if result == confirmed { return reg_confirmed, RegInfo{}}
+			return reg_rendezvous, RegInfo{}
 		} else {
 			enqIdx := senders
 			tail = c.getTail(nodeId(enqIdx), tail)
@@ -293,33 +266,58 @@ func (c *LFChan) regSelectForSend(selectInstance *SelectInstance, element unsafe
 				tail.data[i*2+1] = nil
 				continue
 			}
-			return true, RegInfo{tail, i}
+			return reg_added, RegInfo{tail, i}
 		}
 	}
 }
 
-func (c *LFChan) regSelectForReceive(selectInstance *SelectInstance) (added bool, regInfo RegInfo) {
+func (c *LFChan) regSelectForReceive(selectInstance *SelectInstance) (uint8, RegInfo) {
 	for {
 		head := c.head()
 		tail := c.tail()
 		senders, receivers := c.incReceiversAndGetSnapshot()
 		if receivers <= senders {
-			result := c.tryResume(head, receivers, ReceiverElement, selectInstance)
-			if result != fail {
-				runtime.SetGParam(selectInstance.gp, result)
-				return false, RegInfo{}
-			}
+			result := c.tryResumeSelect(head, receivers, ReceiverElement, selectInstance)
+			if result == fail { continue }
+			if result == confirmed { return reg_confirmed, RegInfo{}}
+			runtime.SetGParam(selectInstance.gp, result)
+			return reg_rendezvous, RegInfo{}
 		} else {
 			enqIdx := receivers
 			tail = c.getTail(nodeId(enqIdx), tail)
 			i := indexInNode(enqIdx)
 			if !tail.casContinuation(i, nil, unsafe.Pointer(selectInstance)) {
 				// the cell is broken
-				tail.data[i*2+1] = nil
 				continue
 			}
-			return true, RegInfo{tail, i}
+			return reg_added, RegInfo{tail, i}
 		}
+	}
+}
+
+func (c *LFChan) tryResumeSelect(head *segment, deqIdx uint64, element unsafe.Pointer, curSelectInstance *SelectInstance) unsafe.Pointer {
+	head = c.getHead(nodeId(deqIdx), head)
+	i := indexInNode(deqIdx)
+	cont := head.readContinuation(i)
+
+	if cont == broken { return fail }
+
+	if IntType(cont) == SelectInstanceType {
+		elementToReturn := head.data[i * 2 + 1]
+		head.data[i * 2 + 1] = nil
+
+		selectInstance := (*SelectInstance) (cont)
+		switch selectInstance.trySelectFromSelect(curSelectInstance, unsafe.Pointer(c), element) {
+		case try_select_sucess: return elementToReturn
+		case try_select_fail: return fail
+		case try_select_confirmed: return confirmed
+		default: panic("Impossible")
+		}
+	} else {
+		elementToReturn := runtime.GetGParam(cont)
+		runtime.SetGParam(cont, element)
+		runtime.UnparkUnsafe(cont)
+		return elementToReturn
 	}
 }
 

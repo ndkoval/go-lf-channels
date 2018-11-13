@@ -221,7 +221,7 @@ func TestStressSelects(t *testing.T) {
 
 
 func TestStressSelectsOver2Channels(t *testing.T) {
-	n := 100000
+	n := 500000
 	k := 10
 	c1 := NewLFChan(capacity)
 	c2 := NewLFChan(capacity)
