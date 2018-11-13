@@ -170,7 +170,7 @@ func TestStressWithSelectOnReceive(t *testing.T) { // TODO
 
 func TestStressSelects(t *testing.T) {
 	n := 500000
-	k := 3
+	k := 10
 	c := NewLFChan(capacity)
 	dummy := NewLFChan(capacity)
 	wg := sync.WaitGroup{}

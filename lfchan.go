@@ -105,12 +105,18 @@ func (c *LFChan) tryResumeSimpleSend(head *segment, deqIdx uint64, element unsaf
 	if cont == broken { return false }
 
 	if IntType(cont) != SelectInstanceType {
+		head.data[i * 2] = nil
 		runtime.SetGParam(cont, element)
 		runtime.UnparkUnsafe(cont)
 		return true
 	} else {
 		selectInstance := (*SelectInstance)(cont)
-		if selectInstance.trySelectSimple(c, element) {
+
+		sid := atomic.LoadUint64(&selectInstance.id)
+		if atomic.LoadPointer(&head.data[i * 2]) == broken { return false }
+		head.data[i * 2] = broken
+
+		if selectInstance.trySelectSimple(sid, c, element) {
 			return true
 		} else {
 			return false
@@ -126,6 +132,7 @@ func (c *LFChan) tryResumeSimpleReceive(head *segment, deqIdx uint64) unsafe.Poi
 	if cont == broken { return fail }
 
 	if IntType(cont) != SelectInstanceType {
+		head.data[i * 2] = nil
 		elementToReturn := runtime.GetGParam(cont)
 		runtime.UnparkUnsafe(cont)
 		return elementToReturn
@@ -133,7 +140,12 @@ func (c *LFChan) tryResumeSimpleReceive(head *segment, deqIdx uint64) unsafe.Poi
 		elementToReturn := head.data[i * 2 + 1]
 		head.data[i * 2 + 1] = nil
 		selectInstance := (*SelectInstance)(cont)
-		if selectInstance.trySelectSimple(c, ReceiverElement) {
+
+		sid := atomic.LoadUint64(&selectInstance.id)
+		if atomic.LoadPointer(&head.data[i * 2]) == broken { return fail }
+		head.data[i * 2] = broken
+
+		if selectInstance.trySelectSimple(sid, c, ReceiverElement) {
 			return elementToReturn
 		} else {
 			return fail
@@ -307,7 +319,12 @@ func (c *LFChan) tryResumeSelect(head *segment, deqIdx uint64, element unsafe.Po
 		head.data[i * 2 + 1] = nil
 
 		selectInstance := (*SelectInstance) (cont)
-		switch selectInstance.trySelectFromSelect(curSelectInstance, unsafe.Pointer(c), element) {
+
+		sid := atomic.LoadUint64(&selectInstance.id)
+		if atomic.LoadPointer(&head.data[i * 2]) == broken { return fail }
+		head.data[i * 2] = nil
+
+		switch selectInstance.trySelectFromSelect(sid, curSelectInstance, unsafe.Pointer(c), element) {
 		case try_select_sucess: return elementToReturn
 		case try_select_fail: return fail
 		case try_select_confirmed: return confirmed
@@ -328,7 +345,7 @@ func (s *segment) clean(index uint32) {
 	//cont := s.readContinuation(index)
 	//if cont == broken { return }
 	//if !s.casContinuation(index, cont, broken) { return }
-	s.data[index * 2] = broken
+	atomic.StorePointer(&s.data[index * 2], broken)
 	s.data[index * 2 + 1] = nil
 	if atomic.AddUint32(&s._cleaned, 1) < segmentSize { return }
 	// Remove the segment

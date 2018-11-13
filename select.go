@@ -32,13 +32,10 @@ func shuffleAlternatives(alts []SelectAlternative) []SelectAlternative {
 }
 
 func SelectImpl(alternatives []SelectAlternative) {
-	selectInstance := &SelectInstance {
-		__type: SelectInstanceType,
-		id: nextSelectInstanceId(),
-		state: state_registering,
-		gp: runtime.GetGoroutine(),
-	}
+	gp := runtime.GetGoroutine()
+	selectInstance := getSelectInstance(gp)
 	selectInstance.doSelect(alternatives)
+	returnSelectInstance(gp, selectInstance)
 }
 
 // Performs select in 3-phase way. At first it selects
@@ -55,28 +52,37 @@ func (s *SelectInstance) doSelect(alternatives []SelectAlternative) {
 const try_select_fail = uint8(0)
 const try_select_confirmed = uint8(1)
 const try_select_sucess = uint8(2)
-func (s *SelectInstance) trySelectFromSelect(selectFrom *SelectInstance, channel unsafe.Pointer, element unsafe.Pointer) uint8 {
+func (s *SelectInstance) trySelectFromSelect(sid uint64, selectFrom *SelectInstance, channel unsafe.Pointer, element unsafe.Pointer) uint8 {
+	stateOffset := uintptr(sid % selectInstanceIdDelta)
+	stateRegisteringS := unsafe.Pointer(state_registering_base + stateOffset)
+	stateSpinWaitingS := unsafe.Pointer(state_spin_waiting_base + stateOffset)
+	stateWaitingS := unsafe.Pointer(state_waiting_base + stateOffset)
+
+	if stateWaitingS != unsafe.Pointer(state_waiting_base) { panic("d")}
+
+
 	state := s.getState()
 	x := 0
-	for state == state_registering {
+	for state == stateRegisteringS {
 		x++; if x % 1000 == 0 { runtime.Gosched() }
 		selectFrom.waitingFor = s
 		state = s.getState()
 		if shouldConfirm(selectFrom, selectFrom, selectFrom.id) {
 			selectFrom.waitingFor = nil
-			selectFrom.setState(state_spin_waiting)
+			selectFrom.setState(spin_waiting_state(selectFrom))
 			return try_select_confirmed
 		}
 	}
 	selectFrom.waitingFor = nil
-	if state == state_spin_waiting {
-		if !s.casState(state_spin_waiting, state_reg_selected) { return try_select_fail }
+
+	if state == stateSpinWaitingS {
+		if !s.casState(stateSpinWaitingS, state_reg_selected) { return try_select_fail }
 		runtime.SetGParam(s.gp, element)
 		s.setState(channel)
 		return try_select_sucess
 	}
-	if state == state_waiting {
-		if !s.casState(state, channel) { return try_select_fail }
+	if state == stateWaitingS {
+		if !s.casState(stateWaitingS, channel) { return try_select_fail }
 		runtime.SetGParam(s.gp, element)
 		runtime.UnparkUnsafe(s.gp)
 		return try_select_sucess
@@ -85,19 +91,25 @@ func (s *SelectInstance) trySelectFromSelect(selectFrom *SelectInstance, channel
 	}
 }
 
-func (s *SelectInstance) trySelectSimple(channel *LFChan, element unsafe.Pointer) bool {
+func (s *SelectInstance) trySelectSimple(sid uint64, channel *LFChan, element unsafe.Pointer) bool {
+	stateOffset := uintptr(sid % selectInstanceIdDelta)
+	stateRegisteringS := unsafe.Pointer(state_registering_base + stateOffset)
+	stateSpinWaitingS := unsafe.Pointer(state_spin_waiting_base + stateOffset)
+	stateWaitingS := unsafe.Pointer(state_waiting_base + stateOffset)
+
 	state := s.getState()
-	for state == state_registering {
+	for state == stateRegisteringS {
 		state = s.getState()
 	}
-	if state == state_spin_waiting {
-		if !s.casState(state_spin_waiting, state_reg_selected) { return false }
+
+	if state == stateSpinWaitingS {
+		if !s.casState(stateSpinWaitingS, state_reg_selected) { return false }
 		runtime.SetGParam(s.gp, element)
 		s.setState(unsafe.Pointer(channel))
 		return true
 	}
-	if state == state_waiting {
-		if !s.casState(state, unsafe.Pointer(channel)) { return false }
+	if state == stateWaitingS {
+		if !s.casState(stateWaitingS, unsafe.Pointer(channel)) { return false }
 		runtime.SetGParam(s.gp, element)
 		runtime.UnparkUnsafe(s.gp)
 		return true
@@ -108,7 +120,7 @@ func (s *SelectInstance) trySelectSimple(channel *LFChan, element unsafe.Pointer
 
 func shouldConfirm(start *SelectInstance, cur *SelectInstance, min uint64) bool {
 	next := cur.waitingFor
-	if next == nil { return false}
+	if next == nil { return false }
 	if next.id < min { min = next.id }
 	if next == start { return min == start.id }
 	return shouldConfirm(start, next, min)
@@ -123,8 +135,9 @@ func (s *SelectInstance) selectAlternative(alternatives []SelectAlternative) (re
 			reginfos[i] = regInfo
 		case reg_confirmed:
 			state := s.getState()
+			stateSpinWaiting := spin_waiting_state(s)
 			x := 0
-			for state == state_spin_waiting || state == state_reg_selected {
+			for state == stateSpinWaiting || state == state_reg_selected {
 				x++; if x % 1000 == 0 { runtime.Gosched() }
 				state = s.getState()
 			}
@@ -142,12 +155,13 @@ func (s *SelectInstance) selectAlternative(alternatives []SelectAlternative) (re
 			return
 		}
 	}
-	atomic.StorePointer(&s.state, state_waiting)
+	atomic.StorePointer(&s.state, waiting_state(s))
 	runtime.ParkUnsafe(s.gp)
 	result = runtime.GetGParam(s.gp)
 	runtime.SetGParam(s.gp, nil)
 	channel := (*LFChan) (s.state)
 	alternative = s.findAlternative(channel, alternatives)
+	s.setState(state_done)
 	return
 }
 
@@ -173,9 +187,41 @@ func (s *SelectInstance) cancelNonSelectedAlternatives(reginfos [2]RegInfo) {
 	}
 }
 
+func getSelectInstance(gp unsafe.Pointer) *SelectInstance {
+	sip := runtime.GetGSelect(gp)
+	if sip == nil || true {
+		return &SelectInstance {
+			__type: SelectInstanceType,
+			id: nextSelectInstanceId(),
+			state: unsafe.Pointer(state_registering_base),
+			gp: runtime.GetGoroutine(),
+		}
+	}
+	runtime.SetGSelect(gp, nil)
+	si := (*SelectInstance) (sip)
+	return si
+}
+
+func returnSelectInstance(gp unsafe.Pointer, si *SelectInstance) {
+	atomic.StoreUint64(&si.id, si.id + 1)
+	if si.id % selectInstanceIdDelta == 0 { return } // enough with it :)
+	si.state = unsafe.Pointer(state_registering_base + uintptr(si.id % selectInstanceIdDelta)) // reg state
+	runtime.SetGSelect(gp, unsafe.Pointer(si))
+}
+
+func waiting_state(si *SelectInstance) unsafe.Pointer {
+	return unsafe.Pointer(state_waiting_base + uintptr(si.id % selectInstanceIdDelta))
+}
+
+func spin_waiting_state(si *SelectInstance) unsafe.Pointer {
+	return unsafe.Pointer(state_spin_waiting_base + uintptr(si.id % selectInstanceIdDelta))
+}
+
+const selectInstanceIdDelta = uint64(1)
+
 var _nextSelectInstanceId uint64 = 0
 func nextSelectInstanceId() uint64 {
-	return atomic.AddUint64(&_nextSelectInstanceId, 1)
+	return atomic.AddUint64(&_nextSelectInstanceId, selectInstanceIdDelta)
 }
 
 const SelectInstanceType int32 = 1098498093
@@ -186,11 +232,12 @@ type SelectInstance struct {
 	gp           unsafe.Pointer // goroutine
 	waitingFor   *SelectInstance
 }
-var state_registering = unsafe.Pointer(uintptr(0))
-var state_waiting = unsafe.Pointer(uintptr(1))
-var state_spin_waiting = unsafe.Pointer(uintptr(2))
-var state_reg_selected = unsafe.Pointer(uintptr(3))
-var state_done = unsafe.Pointer(uintptr(4))
+var state_registering_base = uintptr(0)
+var state_waiting_base = uintptr(selectInstanceIdDelta)
+var state_spin_waiting_base = uintptr(2 * selectInstanceIdDelta)
+
+var state_reg_selected = unsafe.Pointer(uintptr(3 * selectInstanceIdDelta))
+var state_done = unsafe.Pointer(uintptr(3 * selectInstanceIdDelta + 1))
 
 type RegInfo struct {
 	segment *segment
