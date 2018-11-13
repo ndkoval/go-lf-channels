@@ -18,7 +18,7 @@ func main() {
 	defer pprof.StopCPUProfile()
 
 	CPU := 2
-	n := 1000000000
+	n := 50000000
 	runtime.GOMAXPROCS(2)
 	c := NewLFChan(0)
 	//c := make(chan int)
@@ -26,30 +26,30 @@ func main() {
 	wg.Add(CPU)
 	for producer := 0; producer < CPU / 2; producer++ {
 		go func() {
-			alts := []SelectAlternative{{channel: c, element: IntToUnsafePointer(0), action: func(result unsafe.Pointer) {}}}
+			//alts := []SelectAlternative{{channel: c, element: IntToUnsafePointer(0), action: func(result unsafe.Pointer) {}}}
 			defer wg.Done()
 			for i := 0; i < n; i++ {
 				//for k := 0; k < 100; k++ {}
 				//if true { atomic.StorePointer(&x, unsafe.Pointer(&SelectInstance{id:uint64(i)})) }
 				//if rand.Int() == 0  { print(x) }
 				//select { case c <- i: {} }
-				SelectImpl(alts)
-				//c.SendInt(i)
+				//SelectImpl(alts)
+				c.SendInt(i)
 				//c <- i
 			}
 		}()
 	}
 	for consumer := 0; consumer < CPU / 2; consumer++ {
 		go func() {
-			alts := []SelectAlternative{{channel: c, element: ReceiverElement, action: func(result unsafe.Pointer) {}}}
+			//alts := []SelectAlternative{{channel: c, element: ReceiverElement, action: func(result unsafe.Pointer) {}}}
 			defer wg.Done()
 			for i := 0; i < n; i++ {
 				//for k := 0; k < 100; k++ {}
 				//if true { atomic.StorePointer(&x, unsafe.Pointer(&SelectInstance{id:uint64(i)})) }
 				//if rand.Int() == 0  { print(x) }
 				//select { case <- c: {} }
-				SelectImpl(alts)
-				//c.ReceiveInt()
+				//SelectImpl(alts)
+				c.ReceiveInt()
 				//<- c
 			}
 		}()
