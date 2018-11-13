@@ -57,27 +57,26 @@ const try_select_confirmed = uint8(1)
 const try_select_sucess = uint8(2)
 func (s *SelectInstance) trySelectFromSelect(selectFrom *SelectInstance, channel unsafe.Pointer, element unsafe.Pointer) uint8 {
 	state := s.getState()
-	if state == state_registering {
-		if s.casState(state_registering, unsafe.Pointer(selectFrom)) {
-			for {
-				state = s.getState()
-				if state != unsafe.Pointer(selectFrom) { break }
-				if shouldConfirm(selectFrom, selectFrom, selectFrom.id) {
-					selectFrom.setState(state_confirmed)
-					return try_select_confirmed
-				}
-			}
-			if state == state_confirmed {
-				runtime.SetGParam(s.gp, element)
-				s.setState(channel)
-				return try_select_sucess
-			}
-		} else {
-			state = s.getState()
+	x := 0
+	for state == state_registering {
+		x++; if x % 1000 == 0 { runtime.Gosched() }
+		selectFrom.waitingFor = s
+		state = s.getState()
+		if shouldConfirm(selectFrom, selectFrom, selectFrom.id) {
+			selectFrom.waitingFor = nil
+			selectFrom.setState(state_spin_waiting)
+			return try_select_confirmed
 		}
 	}
+	selectFrom.waitingFor = nil
+	if state == state_spin_waiting {
+		if !s.casState(state_spin_waiting, state_reg_selected) { return try_select_fail }
+		runtime.SetGParam(s.gp, element)
+		s.setState(channel)
+		return try_select_sucess
+	}
 	if state == state_waiting {
-		if !s.casState(state_waiting, channel) { return try_select_fail }
+		if !s.casState(state, channel) { return try_select_fail }
 		runtime.SetGParam(s.gp, element)
 		runtime.UnparkUnsafe(s.gp)
 		return try_select_sucess
@@ -88,20 +87,14 @@ func (s *SelectInstance) trySelectFromSelect(selectFrom *SelectInstance, channel
 
 func (s *SelectInstance) trySelectSimple(channel *LFChan, element unsafe.Pointer) bool {
 	state := s.getState()
-	if state == state_registering {
-		if s.casState(state, unsafe.Pointer(channel)) {
-			for {
-				state = s.getState()
-				if state != unsafe.Pointer(channel) { break }
-			}
-			if state == state_confirmed {
-				runtime.SetGParam(s.gp, element)
-				s.setState(state_done)
-				return true
-			}
-		} else {
-			state = s.getState()
-		}
+	for state == state_registering {
+		state = s.getState()
+	}
+	if state == state_spin_waiting {
+		if !s.casState(state_spin_waiting, state_reg_selected) { return false }
+		runtime.SetGParam(s.gp, element)
+		s.setState(unsafe.Pointer(channel))
+		return true
 	}
 	if state == state_waiting {
 		if !s.casState(state, unsafe.Pointer(channel)) { return false }
@@ -114,59 +107,25 @@ func (s *SelectInstance) trySelectSimple(channel *LFChan, element unsafe.Pointer
 }
 
 func shouldConfirm(start *SelectInstance, cur *SelectInstance, min uint64) bool {
-	curState := cur.state
-	if curState == state_registering || curState == state_waiting || curState == state_confirmed || curState == state_done {
-		return false
-	}
-
-	curStateType := IntType(curState)
-	if curStateType != SelectInstanceType {
-		return false
-	}
-
-	next := (*SelectInstance) (curState)
+	next := cur.waitingFor
+	if next == nil { return false}
 	if next.id < min { min = next.id }
-	if next == start {
-		return min == start.id
-	}
+	if next == start { return min == start.id }
 	return shouldConfirm(start, next, min)
 }
 
 func (s *SelectInstance) selectAlternative(alternatives []SelectAlternative) (result unsafe.Pointer, alternative SelectAlternative, reginfos [2]RegInfo) {
 	reginfos = [2]RegInfo{}
 	for i, alt := range alternatives {
-		state := s.getState()
-		if state != state_registering {
-			switch IntType(state) {
-			case LFChanType:
-				channel := (*LFChan) (state)
-				s.setState(state_confirmed)
-				for s.getState() != state_done { }
-				result = runtime.GetGParam(s.gp)
-				runtime.SetGParam(s.gp, nil)
-				alternative = s.findAlternative(channel, alternatives)
-				return
-			case SelectInstanceType:
-				s.setState(state_confirmed)
-				state = s.getState()
-				for state == state_confirmed {
-					state = s.getState()
-				}
-				s.setState(state_done)
-				channel := (*LFChan) (state)
-				result = runtime.GetGParam(s.gp)
-				runtime.SetGParam(s.gp, nil)
-				alternative = s.findAlternative(channel, alternatives)
-				return
-			}
-		}
 		status, regInfo := alt.channel.regSelect(s, alt.element)
 		switch status {
 		case reg_added:
 			reginfos[i] = regInfo
 		case reg_confirmed:
-			state = s.getState()
-			for state == state_confirmed {
+			state := s.getState()
+			x := 0
+			for state == state_spin_waiting || state == state_reg_selected {
+				x++; if x % 1000 == 0 { runtime.Gosched() }
 				state = s.getState()
 			}
 			s.setState(state_done)
@@ -203,7 +162,7 @@ func (s *SelectInstance) findAlternative(channel *LFChan, alternatives []SelectA
 			return alt
 		}
 	}
-	panic(channel)
+	panic("Impossible")
 }
 
 func (s *SelectInstance) cancelNonSelectedAlternatives(reginfos [2]RegInfo) {
@@ -225,11 +184,13 @@ type SelectInstance struct {
 	id 	         uint64
 	state 	     unsafe.Pointer
 	gp           unsafe.Pointer // goroutine
+	waitingFor   *SelectInstance
 }
 var state_registering = unsafe.Pointer(uintptr(0))
 var state_waiting = unsafe.Pointer(uintptr(1))
-var state_confirmed = unsafe.Pointer(uintptr(2))
-var state_done = unsafe.Pointer(uintptr(3))
+var state_spin_waiting = unsafe.Pointer(uintptr(2))
+var state_reg_selected = unsafe.Pointer(uintptr(3))
+var state_done = unsafe.Pointer(uintptr(4))
 
 type RegInfo struct {
 	segment *segment
