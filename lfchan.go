@@ -105,7 +105,7 @@ func (c *LFChan) tryResumeSimpleSend(head *segment, deqIdx uint64, element unsaf
 	if cont == broken { return false }
 
 	if IntType(cont) != SelectInstanceType {
-		head.data[i * 2] = nil
+		head.data[i * 2] = broken
 		runtime.SetGParam(cont, element)
 		runtime.UnparkUnsafe(cont)
 		return true
@@ -132,7 +132,7 @@ func (c *LFChan) tryResumeSimpleReceive(head *segment, deqIdx uint64) unsafe.Poi
 	if cont == broken { return fail }
 
 	if IntType(cont) != SelectInstanceType {
-		head.data[i * 2] = nil
+		head.data[i * 2] = broken
 		elementToReturn := runtime.GetGParam(cont)
 		runtime.UnparkUnsafe(cont)
 		return elementToReturn
@@ -322,7 +322,7 @@ func (c *LFChan) tryResumeSelect(head *segment, deqIdx uint64, element unsafe.Po
 
 		sid := atomic.LoadUint64(&selectInstance.id)
 		if atomic.LoadPointer(&head.data[i * 2]) == broken { return fail }
-		head.data[i * 2] = nil
+		head.data[i * 2] = broken
 
 		switch selectInstance.trySelectFromSelect(sid, curSelectInstance, unsafe.Pointer(c), element) {
 		case try_select_sucess: return elementToReturn
