@@ -52,10 +52,10 @@ func (s *SelectInstance) doSelect(alternatives []SelectAlternative) {
 const try_select_fail = uint8(0)
 const try_select_confirmed = uint8(1)
 const try_select_sucess = uint8(2)
+
 func (s *SelectInstance) trySelectFromSelect(sid uint64, selectFrom *SelectInstance, channel unsafe.Pointer, element unsafe.Pointer) uint8 {
 	stateOffset := uintptr(sid % selectInstanceIdDelta)
 	stateRegisteringS := unsafe.Pointer(state_registering_base + stateOffset)
-	stateSpinWaitingS := unsafe.Pointer(state_spin_waiting_base + stateOffset)
 	stateWaitingS := unsafe.Pointer(state_waiting_base + stateOffset)
 
 	state := s.getState()
@@ -66,18 +66,11 @@ func (s *SelectInstance) trySelectFromSelect(sid uint64, selectFrom *SelectInsta
 		state = s.getState()
 		if shouldConfirm(selectFrom, selectFrom, selectFrom.id) {
 			selectFrom.setWaitingFor(nil)
-			selectFrom.setState(spin_waiting_state(selectFrom))
+			selectFrom.setState(waiting_state(selectFrom))
 			return try_select_confirmed
 		}
 	}
 	selectFrom.setWaitingFor(nil)
-
-	if state == stateSpinWaitingS {
-		if !s.casState(stateSpinWaitingS, state_reg_selected) { return try_select_fail }
-		runtime.SetGParam(s.gp, element)
-		s.setState(channel)
-		return try_select_sucess
-	}
 	if state == stateWaitingS {
 		if !s.casState(stateWaitingS, channel) { return try_select_fail }
 		runtime.SetGParam(s.gp, element)
@@ -91,7 +84,6 @@ func (s *SelectInstance) trySelectFromSelect(sid uint64, selectFrom *SelectInsta
 func (s *SelectInstance) trySelectSimple(sid uint64, channel *LFChan, element unsafe.Pointer) bool {
 	stateOffset := uintptr(sid % selectInstanceIdDelta)
 	stateRegisteringS := unsafe.Pointer(state_registering_base + stateOffset)
-	stateSpinWaitingS := unsafe.Pointer(state_spin_waiting_base + stateOffset)
 	stateWaitingS := unsafe.Pointer(state_waiting_base + stateOffset)
 
 	state := s.getState()
@@ -101,12 +93,6 @@ func (s *SelectInstance) trySelectSimple(sid uint64, channel *LFChan, element un
 		state = s.getState()
 	}
 
-	if state == stateSpinWaitingS {
-		if !s.casState(stateSpinWaitingS, state_reg_selected) { return false }
-		runtime.SetGParam(s.gp, element)
-		s.setState(unsafe.Pointer(channel))
-		return true
-	}
 	if state == stateWaitingS {
 		if !s.casState(stateWaitingS, unsafe.Pointer(channel)) { return false }
 		runtime.SetGParam(s.gp, element)
@@ -133,18 +119,12 @@ func (s *SelectInstance) selectAlternative(alternatives []SelectAlternative) (re
 		case reg_added:
 			reginfos[i] = regInfo
 		case reg_confirmed:
-			state := s.getState()
-			stateSpinWaiting := spin_waiting_state(s)
-			x := 0
-			for state == stateSpinWaiting || state == state_reg_selected {
-				x++; if x % 1000 == 0 { runtime.Gosched() }
-				state = s.getState()
-			}
-			s.setState(state_done)
-			channel := (*LFChan) (state)
+			runtime.ParkUnsafe(s.gp)
 			result = runtime.GetGParam(s.gp)
 			runtime.SetGParam(s.gp, nil)
+			channel := (*LFChan) (s.state)
 			alternative = s.findAlternative(channel, alternatives)
+			s.setState(state_done)
 			return
 		case reg_rendezvous:
 			s.setState(state_done)
@@ -212,11 +192,7 @@ func waiting_state(si *SelectInstance) unsafe.Pointer {
 	return unsafe.Pointer(state_waiting_base + uintptr(si.id % selectInstanceIdDelta))
 }
 
-func spin_waiting_state(si *SelectInstance) unsafe.Pointer {
-	return unsafe.Pointer(state_spin_waiting_base + uintptr(si.id % selectInstanceIdDelta))
-}
-
-const selectInstanceIdDelta = uint64(2)
+const selectInstanceIdDelta = uint64(1024)
 
 var _nextSelectInstanceId uint64 = 0
 func nextSelectInstanceId() uint64 {
@@ -241,10 +217,7 @@ func (s *SelectInstance) setWaitingFor(si *SelectInstance) {
 
 var state_registering_base = uintptr(0)
 var state_waiting_base = uintptr(selectInstanceIdDelta)
-var state_spin_waiting_base = uintptr(2 * selectInstanceIdDelta)
-
-var state_reg_selected = unsafe.Pointer(uintptr(3 * selectInstanceIdDelta))
-var state_done = unsafe.Pointer(uintptr(3 * selectInstanceIdDelta + 1))
+var state_done = unsafe.Pointer(uintptr(2 * selectInstanceIdDelta + 1))
 
 type RegInfo struct {
 	segment *segment
