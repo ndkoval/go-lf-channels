@@ -217,7 +217,7 @@ func spin_waiting_state(si *SelectInstance) unsafe.Pointer {
 	return unsafe.Pointer(state_spin_waiting_base + uintptr(si.id % selectInstanceIdDelta))
 }
 
-const selectInstanceIdDelta = uint64(1)
+const selectInstanceIdDelta = uint64(1024)
 
 var _nextSelectInstanceId uint64 = 0
 func nextSelectInstanceId() uint64 {
