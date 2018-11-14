@@ -32,10 +32,13 @@ func shuffleAlternatives(alts []SelectAlternative) []SelectAlternative {
 }
 
 func SelectImpl(alternatives []SelectAlternative) {
-	gp := runtime.GetGoroutine()
-	selectInstance := getSelectInstance(gp)
+	selectInstance := &SelectInstance{
+		__type: SelectInstanceType,
+		id:		nextSelectInstanceId(),
+		state:  state_registering,
+		gp:     runtime.GetGoroutine(),
+	}
 	selectInstance.doSelect(alternatives)
-	returnSelectInstance(gp, selectInstance)
 }
 
 // Performs select in 3-phase way. At first it selects
@@ -54,25 +57,21 @@ const try_select_confirmed = uint8(1)
 const try_select_sucess = uint8(2)
 
 func (s *SelectInstance) trySelectFromSelect(sid uint64, selectFrom *SelectInstance, channel unsafe.Pointer, element unsafe.Pointer) uint8 {
-	stateOffset := uintptr(sid % selectInstanceIdDelta)
-	stateRegisteringS := unsafe.Pointer(state_registering_base + stateOffset)
-	stateWaitingS := unsafe.Pointer(state_waiting_base + stateOffset)
-
 	state := s.getState()
 	x := 0
-	for state == stateRegisteringS {
+	for state == state_registering {
 		x++; if x % 1000 == 0 { runtime.Gosched() }
 		selectFrom.setWaitingFor(s)
 		state = s.getState()
 		if shouldConfirm(selectFrom, selectFrom, selectFrom.id) {
 			selectFrom.setWaitingFor(nil)
-			selectFrom.setState(waiting_state(selectFrom))
+			selectFrom.setState(state_waiting)
 			return try_select_confirmed
 		}
 	}
 	selectFrom.setWaitingFor(nil)
-	if state == stateWaitingS {
-		if !s.casState(stateWaitingS, channel) { return try_select_fail }
+	if state == state_waiting {
+		if !s.casState(state_waiting, channel) { return try_select_fail }
 		runtime.SetGParam(s.gp, element)
 		runtime.UnparkUnsafe(s.gp)
 		return try_select_sucess
@@ -82,19 +81,15 @@ func (s *SelectInstance) trySelectFromSelect(sid uint64, selectFrom *SelectInsta
 }
 
 func (s *SelectInstance) trySelectSimple(sid uint64, channel *LFChan, element unsafe.Pointer) bool {
-	stateOffset := uintptr(sid % selectInstanceIdDelta)
-	stateRegisteringS := unsafe.Pointer(state_registering_base + stateOffset)
-	stateWaitingS := unsafe.Pointer(state_waiting_base + stateOffset)
-
 	state := s.getState()
 	x := 0
-	for state == stateRegisteringS {
+	for state == state_registering {
 		x++; if x % 1000 == 0 { runtime.Gosched() }
 		state = s.getState()
 	}
 
-	if state == stateWaitingS {
-		if !s.casState(stateWaitingS, unsafe.Pointer(channel)) { return false }
+	if state == state_waiting {
+		if !s.casState(state_waiting, unsafe.Pointer(channel)) { return false }
 		runtime.SetGParam(s.gp, element)
 		runtime.UnparkUnsafe(s.gp)
 		return true
@@ -134,7 +129,7 @@ func (s *SelectInstance) selectAlternative(alternatives []SelectAlternative) (re
 			return
 		}
 	}
-	atomic.StorePointer(&s.state, waiting_state(s))
+	atomic.StorePointer(&s.state, state_waiting)
 	runtime.ParkUnsafe(s.gp)
 	result = runtime.GetGParam(s.gp)
 	runtime.SetGParam(s.gp, nil)
@@ -166,37 +161,9 @@ func (s *SelectInstance) cancelNonSelectedAlternatives(reginfos [2]RegInfo) {
 	}
 }
 
-func getSelectInstance(gp unsafe.Pointer) *SelectInstance {
-	sip := runtime.GetGSelect(gp)
-	if sip == nil {
-		return &SelectInstance {
-			__type: SelectInstanceType,
-			id: nextSelectInstanceId(),
-			state: unsafe.Pointer(state_registering_base),
-			gp: runtime.GetGoroutine(),
-		}
-	}
-	runtime.SetGSelect(gp, nil)
-	si := (*SelectInstance) (sip)
-	return si
-}
-
-func returnSelectInstance(gp unsafe.Pointer, si *SelectInstance) {
-	atomic.StoreUint64(&si.id, si.id + 1)
-	if si.id % selectInstanceIdDelta == 0 { return } // enough with it :)
-	si.state = unsafe.Pointer(state_registering_base + uintptr(si.id % selectInstanceIdDelta)) // reg state
-	runtime.SetGSelect(gp, unsafe.Pointer(si))
-}
-
-func waiting_state(si *SelectInstance) unsafe.Pointer {
-	return unsafe.Pointer(state_waiting_base + uintptr(si.id % selectInstanceIdDelta))
-}
-
-const selectInstanceIdDelta = uint64(1024)
-
 var _nextSelectInstanceId uint64 = 0
 func nextSelectInstanceId() uint64 {
-	return atomic.AddUint64(&_nextSelectInstanceId, selectInstanceIdDelta)
+	return atomic.AddUint64(&_nextSelectInstanceId, 1)
 }
 
 const SelectInstanceType int32 = 1098498093
@@ -215,9 +182,9 @@ func (s *SelectInstance) setWaitingFor(si *SelectInstance) {
 	atomic.StorePointer(&s.waitingFor, unsafe.Pointer(si))
 }
 
-var state_registering_base = uintptr(0)
-var state_waiting_base = uintptr(selectInstanceIdDelta)
-var state_done = unsafe.Pointer(uintptr(2 * selectInstanceIdDelta + 1))
+var state_registering = unsafe.Pointer(uintptr(0))
+var state_waiting = unsafe.Pointer(uintptr(1))
+var state_done = unsafe.Pointer(uintptr(2))
 
 type RegInfo struct {
 	segment *segment
