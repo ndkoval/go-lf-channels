@@ -5,40 +5,6 @@ import (
 	"unsafe"
 )
 
-// == LFChan ==
-
-func (c *LFChan) head() *segment {
-	return (*segment)(atomic.LoadPointer(&c._head))
-}
-
-func (c *LFChan) tail() *segment {
-	return (*segment)(atomic.LoadPointer(&c._tail))
-}
-
-func (c *LFChan) moveHeadForward(new *segment) {
-	for {
-		cur := c.head()
-		if cur.id > new.id {
-			return
-		}
-		if atomic.CompareAndSwapPointer(&c._head, unsafe.Pointer(cur), unsafe.Pointer(new)) {
-			return
-		}
-	}
-}
-
-func (c *LFChan) moveTailForward(new *segment) {
-	for {
-		cur := c.tail()
-		if cur.id > new.id {
-			return
-		}
-		if atomic.CompareAndSwapPointer(&c._tail, unsafe.Pointer(cur), unsafe.Pointer(new)) {
-			return
-		}
-	}
-}
-
 // == SelectInstance ==
 
 func (s *SelectInstance) getState() unsafe.Pointer {
@@ -54,14 +20,11 @@ func (s *SelectInstance) casState(old, new unsafe.Pointer) bool {
 }
 
 func IntType(p unsafe.Pointer) int32 {
+	if p == nil { panic( "XXX") }
 	return *(*int32)(p)
 }
 
 // == segment ==
-
-func (n *segment) casContinuation(index uint32, old, new unsafe.Pointer) bool {
-	return atomic.CompareAndSwapPointer(&n.data[index * 2], old, new)
-}
 
 func (n *segment) next() *segment {
 	return (*segment)(atomic.LoadPointer(&n._next))

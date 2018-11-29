@@ -7,46 +7,44 @@ import (
 )
 
 var broken = (unsafe.Pointer) ((uintptr) (1))
-var fail = (unsafe.Pointer) ((uintptr) (2))
-var confirmed = unsafe.Pointer(uintptr(3))
 
 
 // == Channel structure ==
 
-const LFChanType int32 = 1094645093
 type LFChan struct {
-	__type 	     int32
-	lock    uint32
-	highest uint64
-	lowest  uint64
+	_deqIdx int64
+	_enqIdx int64
+
 	_head    unsafe.Pointer
 	_tail    unsafe.Pointer
 }
 
 func NewLFChan(capacity uint64) *LFChan {
-	node := unsafe.Pointer(newNode(0, nil))
-	return &LFChan{
-		__type: LFChanType,
-		_head:    node,
-		_tail:    node,
+	emptyNode := (unsafe.Pointer) (newNode(0, nil))
+	c := &LFChan{
+		_deqIdx: 1,
+		_enqIdx: 1,
+		_head: emptyNode,
+		_tail: emptyNode,
 	}
+	return c
 }
 
 // == Segment structure ==
 
-const segmentSizeShift = uint32(10)
-const segmentSize = uint32(1 << segmentSizeShift)
-const segmentIndexMask = uint64(segmentSize - 1)
+const segmentSizeShift = 5
+const segmentSize = 1 << segmentSizeShift
+const segmentIndexMask = segmentSize - 1
 
 type segment struct {
-	id       uint64
+	id       int64
 	_next    unsafe.Pointer
 	_cleaned uint32
 	_prev    unsafe.Pointer
 	data     [segmentSize*2]unsafe.Pointer
 }
 
-func newNode(id uint64, prev *segment) *segment {
+func newNode(id int64, prev *segment) *segment {
 	return &segment{
 		id:       id,
 		_next:    nil,
@@ -55,300 +53,368 @@ func newNode(id uint64, prev *segment) *segment {
 	}
 }
 
-func indexInNode(index uint64) uint32 {
-	return uint32((index * 1) & segmentIndexMask)
+func indexInNode(index int64) int32 {
+	return int32((index * 1) & segmentIndexMask)
 }
 
-func nodeId(index uint64) uint64 {
+func nodeId(index int64) int64 {
 	return index >> segmentSizeShift
 }
 
 // == `send` and `receive` functions ==
 
 func (c *LFChan) Send(element unsafe.Pointer) {
-	for {
-		head := c.head()
-		tail := c.tail()
-		senders, receivers := c.incSendersAndGetSnapshot()
-		if senders <= receivers {
-			if c.tryResumeSimpleSend(head, senders, element) { return }
-		} else {
-			if c.trySuspendAndReturnSend(tail, senders, element) { return }
-		}
-	}
+	c.sendOrReceive(element)
 }
 
 func (c *LFChan) Receive() unsafe.Pointer {
-	for {
-		head := c.head()
-		tail := c.tail()
-		senders, receivers := c.incReceiversAndGetSnapshot()
-		if receivers <= senders {
-			result := c.tryResumeSimpleReceive(head, receivers)
-			if result != fail {
-				return result
+	return c.sendOrReceive(ReceiverElement)
+}
+
+func (c* LFChan) sendOrReceive(element unsafe.Pointer) unsafe.Pointer {
+try_again: for { // CAS-loop
+	enqIdx := c.enqIdx()
+	deqIdx := c.deqIdx()
+	if enqIdx < deqIdx {
+		continue try_again
+	}
+	// Check if queue is empty
+	if deqIdx == enqIdx {
+		if c.addToWaitingQueue2(enqIdx, element, nil) {
+			gp := runtime.GetGoroutine()
+			runtime.ParkUnsafe(gp)
+			return runtime.GetGParam(gp)
+		} else {
+			continue try_again
+		}
+	} else {
+		// Queue is not empty
+		head := c.getHead()
+		headId := head.id
+		// check consistency
+		deqIdxNodeId := nodeId(deqIdx)
+		if headId != deqIdxNodeId {
+			if headId < deqIdxNodeId {
+				headNext := head.next()
+				headNext._prev = nil
+				c.casHead(head, headNext)
+			} else {
+				c.casDeqIdx(deqIdx, headId<<segmentSizeShift)
+			}
+			continue try_again
+		}
+		// Read the first element
+		deqIndexInHead := indexInNode(deqIdx)
+		firstElement := head.readElement(deqIndexInHead)
+		// Check that the element is not taken already.
+		if firstElement == broken {
+			c.casDeqIdx(deqIdx, deqIdx+1)
+			continue try_again
+		}
+		// Decide should we make a rendezvous or not
+		makeRendezvous := (element == ReceiverElement) != (firstElement == ReceiverElement)
+		if makeRendezvous {
+			if c.tryResumeContinuation(head, deqIndexInHead, deqIdx, element) {
+				return firstElement
+			} else {
+				continue try_again
 			}
 		} else {
-			result := c.trySuspendAndReturnReceive(tail, receivers)
-			if result != fail {
-				return result
+			if c.addToWaitingQueue2(enqIdx, element, nil) {
+				gp := runtime.GetGoroutine()
+				runtime.ParkUnsafe(gp)
+				return runtime.GetGParam(gp)
+			} else {
+				continue try_again
 			}
 		}
 	}
 }
+}
 
-func (c *LFChan) tryResumeSimpleSend(head *segment, deqIdx uint64, element unsafe.Pointer) bool {
-	head = c.getHead(nodeId(deqIdx), head)
-	i := indexInNode(deqIdx)
-	cont := head.readContinuation(i)
+func (c *LFChan) addToWaitingQueue(enqIdx int64, element unsafe.Pointer, cont unsafe.Pointer) (bool, RegInfo) {
+	// Read tail and its id
+	tail := c.getTail()
+	tailId := tail.id
+	// check consistency
+	if enqIdx <= tailId << segmentSizeShift {
+		if enqIdx == tailId << segmentSizeShift {
+			c.casEnqIdx(enqIdx, enqIdx + 1)
+		}
+		return false, RegInfo{}
+	}
+	// Get continuation if needed
+	if cont == nil { cont = runtime.GetGoroutine() }
+	// Check if a new node should be added
+	if enqIdx == (tailId + 1) << segmentSizeShift  {
+		success, node := c.addNewNode(tail, element, enqIdx, cont)
+		if success {
+			return true, RegInfo{segment: node, index: 0}
+		}  else { return false, RegInfo{} }
+	}
+	// Just check that `enqIdx` is valid and try to store the current
+	// goroutine into the `tail` by `enqIdxInNode`
+	enqIdxInNode := indexInNode(enqIdx)
+	if c.storeContinuation(tail, enqIdxInNode, enqIdx, element, cont) {
+		return true, RegInfo{segment: tail, index: enqIdxInNode}
+	} else { return false, RegInfo{} }
+}
 
-	if cont == broken { return false }
+func (c *LFChan) addToWaitingQueue2(enqIdx int64, element unsafe.Pointer, cont unsafe.Pointer) bool {
+	success, _ := c.addToWaitingQueue(enqIdx, element, cont)
+	return success
+}
 
-	if IntType(cont) != SelectInstanceType {
-		head.data[i * 2] = broken
+// Tries to read an element from the specified node
+// at the specified index. Returns the read element or
+// marks the slot as broken (sets `TAKEN_ELEMENT` to the slot)
+// and returns `TAKEN_ELEMENT` if the element is unavailable.
+func (c *LFChan) addNewNode(tail *segment, element unsafe.Pointer, enqIdx int64, cont unsafe.Pointer) (bool, *segment) {
+	for {
+		// If next node is not null, help to move the tail pointer
+		tailNext := (*segment) (tail.next())
+		if tailNext != nil {
+			// If this CAS fails, another thread moved the tail pointer
+			c.casTail(tail, tailNext)
+			c.casEnqIdx(enqIdx, enqIdx + 1) // help
+			return false, nil
+		}
+		// Create a new node with this continuation and element and try to add it
+		newTail := newNode(tail.id + 1, tail)
+		newTail.data[0] = element
+		newTail.data[1] = cont
+		if tail.casNext(nil, unsafe.Pointer(newTail)) {
+			// New node added, try to move tail,
+			// if the CAS fails, another thread moved it.
+			c.casTail(tail, newTail)
+			c.casEnqIdx(enqIdx, enqIdx + 1) // help for others
+			// Remove the previous tail from the waiting queue
+			// if it was marked as logically removed.
+			if tail.isRemoved() {
+				tail.remove()
+			}
+			// Success, return true.
+			return true, newTail
+		} else { continue }
+	}
+}
+
+// Tries to store the current continuation and element (in this order!)
+// to the specified node at the specified index. Returns `true` on success,
+// `false` otherwise`.
+func (c *LFChan) storeContinuation(node *segment, indexInNode int32, enqIdx int64, element unsafe.Pointer, cont unsafe.Pointer) bool {
+	// Try to move enqueue index forward, return `false` if fails
+	if !c.casEnqIdx(enqIdx, enqIdx + 1) {
+		return false
+	}
+	// Slot `index` is claimed, try to store the continuation and the element (in this order!) to it.
+	// Can fail if another thread marked this slot as broken, return `false` in this case.
+	node.data[indexInNode * 2 + 1] = cont
+
+	if atomic.CompareAndSwapPointer(&node.data[indexInNode * 2], nil, element) {
+		// Can be suspended, return true
+		return true
+	} else {
+		// The slot is broken, clean it and return `false`
+		node.data[indexInNode * 2 + 1] = broken
+		return false
+	}
+}
+
+// Try to remove a continuation from the specified node at the
+// specified index and resume it. Returns `true` on success, `false` otherwise.
+func (c *LFChan) tryResumeContinuation(head *segment, indexInNode int32, deqIdx int64, element unsafe.Pointer) bool {
+	// Try to move 'deqIdx' forward, return `false` if fails
+	if !c.casDeqIdx(deqIdx, deqIdx + 1) { return false }
+	// Read continuation and CAS it to `takenContinuation`
+	var cont unsafe.Pointer
+	var isContSelectInstance bool
+	for {
+		cont, isContSelectInstance = head.readContinuation(indexInNode)
+		if cont == broken { return false }
+		if head.casContinuation(indexInNode, cont, broken) { break }
+	}
+	// Clear element's cell
+	head.data[indexInNode * 2] = broken
+	// Try to resume the continuation
+	if isContSelectInstance {
+		selectInstance := (*SelectInstance) (cont)
+		if !selectInstance.trySetDescriptor(unsafe.Pointer(c)) { return false }
+		runtime.SetGParam(selectInstance.gp, element)
+		runtime.UnparkUnsafe(selectInstance.gp)
+		return true
+	} else { // *g
 		runtime.SetGParam(cont, element)
 		runtime.UnparkUnsafe(cont)
 		return true
-	} else {
-		selectInstance := (*SelectInstance)(cont)
+	}
+}
 
-		sid := atomic.LoadUint64(&selectInstance.id)
-		if atomic.LoadPointer(&head.data[i * 2]) == broken { return false }
-		head.data[i * 2] = broken
 
-		if selectInstance.trySelectSimple(sid, c, element) {
-			return true
-		} else {
+func (c *LFChan) tryResumeContinuationForSelect(head *segment, indexInNode int32, deqIdx int64, element unsafe.Pointer, selectInstance *SelectInstance, firstElement unsafe.Pointer) bool {
+	// Set descriptor at first
+	var desc *SelectDesc
+	var descCont unsafe.Pointer
+	var isDescContSelectInstance bool
+	for {
+		descCont, isDescContSelectInstance = head.readContinuation(indexInNode)
+		if descCont == broken {
+			c.casDeqIdx(deqIdx, deqIdx + 1)
 			return false
 		}
-	}
-}
-
-func (c *LFChan) tryResumeSimpleReceive(head *segment, deqIdx uint64) unsafe.Pointer {
-	head = c.getHead(nodeId(deqIdx), head)
-	i := indexInNode(deqIdx)
-	cont := head.readContinuation(i)
-
-	if cont == broken { return fail }
-
-	if IntType(cont) != SelectInstanceType {
-		head.data[i * 2] = broken
-		elementToReturn := runtime.GetGParam(cont)
-		runtime.UnparkUnsafe(cont)
-		return elementToReturn
-	} else {
-		elementToReturn := head.data[i * 2 + 1]
-		head.data[i * 2 + 1] = nil
-		selectInstance := (*SelectInstance)(cont)
-
-		sid := atomic.LoadUint64(&selectInstance.id)
-		if atomic.LoadPointer(&head.data[i * 2]) == broken { return fail }
-		head.data[i * 2] = broken
-
-		if selectInstance.trySelectSimple(sid, c, ReceiverElement) {
-			return elementToReturn
-		} else {
-			return fail
+		desc = &SelectDesc {
+			__type: SelectDescType,
+			channel: c,
+			selectInstance: selectInstance,
+			cont: descCont,
 		}
+		if head.casContinuation(indexInNode, descCont, unsafe.Pointer(desc)) { break }
 	}
-}
-
-func (c *LFChan) trySuspendAndReturnReceive(tail *segment, enqIdx uint64) unsafe.Pointer {
-	tail = c.getTail(nodeId(enqIdx), tail)
-	i := indexInNode(enqIdx)
-	curG := runtime.GetGoroutine()
-	if atomic.LoadPointer(&tail.data[i * 2]) != nil { return fail }
-	if !tail.casContinuation(i, nil, curG) {
-		// the cell is broken
-		return fail
-	}
-	runtime.ParkUnsafe(curG)
-	result := runtime.GetGParam(curG)
-	runtime.SetGParam(curG, nil)
-	return result
-}
-
-func (c *LFChan) trySuspendAndReturnSend(tail *segment, enqIdx uint64, element unsafe.Pointer) bool {
-	tail = c.getTail(nodeId(enqIdx), tail)
-	i := indexInNode(enqIdx)
-	curG := runtime.GetGoroutine()
-	if atomic.LoadPointer(&tail.data[i * 2]) != nil { return false }
-	runtime.SetGParam(curG, element)
-	if !tail.casContinuation(i, nil, curG) {
-		// the cell is broken
-		runtime.SetGParam(curG, nil)
+	// Invoke selectDesc and update the continuation's cell
+	if desc.invoke() {
+		head.setContinuation(indexInNode, broken)
+	} else {
+		if !selectInstance.isSelected() {
+			head.setContinuation(indexInNode, broken)
+			c.casDeqIdx(deqIdx, deqIdx + 1)
+			return false
+		}
+		head.casContinuation(indexInNode, unsafe.Pointer(desc), desc.cont)
 		return false
 	}
-	runtime.ParkUnsafe(curG)
+	// Move deque index forward
+	c.casDeqIdx(deqIdx, deqIdx + 1)
+	// Resume all continuations
+	var anotherG unsafe.Pointer
+	if isDescContSelectInstance {
+		anotherG = ((*SelectInstance) (descCont)).gp
+	} else {
+		anotherG = descCont
+	}
+	runtime.SetGParam(anotherG, element)
+	runtime.UnparkUnsafe(anotherG)
+	runtime.SetGParam(selectInstance.gp, firstElement)
+	runtime.UnparkUnsafe(selectInstance.gp)
 	return true
 }
 
-func (c *LFChan) trySuspendAndReturn(tail *segment, enqIdx uint64, element unsafe.Pointer) unsafe.Pointer {
-	tail = c.getTail(nodeId(enqIdx), tail)
-	i := indexInNode(enqIdx)
-	tail.data[i * 2 + 1] = element
-	curG := runtime.GetGoroutine()
-	if !tail.casContinuation(i, nil, curG) {
-		// the cell is broken
-		tail.data[i * 2 + 1] = nil
-		return fail
-	}
-	runtime.ParkUnsafe(curG)
-	result := runtime.GetGParam(curG)
-	runtime.SetGParam(curG, nil)
-	return result
-}
-
-func (c *LFChan) getHead(id uint64, cur *segment) *segment {
-	if cur.id == id { return cur }
-	cur = c.findOrCreateNode(id, cur)
-	cur._prev = nil
-	c.moveHeadForward(cur)
-	return cur
-}
-
-func (c *LFChan) getTail(id uint64, cur *segment) *segment {
-	return c.findOrCreateNode(id, cur)
-}
-
-func (c *LFChan) findOrCreateNode(id uint64, cur *segment) *segment {
-	for cur.id < id {
-		curNext := cur.next()
-		if curNext == nil {
-			// add new segment
-			newTail := newNode(cur.id + 1, cur)
-			if cur.casNext(nil, unsafe.Pointer(newTail)) {
-				if cur.isRemoved() { cur.remove() }
-				c.moveTailForward(newTail)
-				curNext = newTail
+func (n *segment) readContinuation(index int32) (cont unsafe.Pointer, isSelectInstance bool) {
+	contPointer := &n.data[index * 2 + 1]
+	for {
+		cont := atomic.LoadPointer(contPointer)
+		if cont == broken {
+			return broken, false
+		}
+		contType := IntType(cont)
+		switch contType {
+		case SelectDescType:
+			desc := (*SelectDesc)(cont)
+			if desc.invoke() {
+				atomic.StorePointer(contPointer, broken)
+				return broken, false
 			} else {
-				curNext = cur.next()
+				atomic.CompareAndSwapPointer(contPointer, cont, desc.cont)
+				return desc.cont, IntType(desc.cont) == SelectInstanceType
+			}
+		case SelectInstanceType: // *SelectInstance
+			return cont, true
+		default: // *g
+			return cont, false
+		}
+	}
+}
+
+
+func (s *segment) readElement(i int32) unsafe.Pointer {
+	// Element index in `Node#_data` array
+	// Spin wait on the slot
+	elementAddr := &s.data[i * 2]
+	element := atomic.LoadPointer(elementAddr) // volatile read
+	if element != nil {
+		return element
+	}
+	// Cannot spin forever, mark the slot as broken if it is still unavailable
+	if atomic.CompareAndSwapPointer(elementAddr, nil, broken) {
+		return broken
+	} else {
+		// The element is set, read it and return
+		return s.data[i * 2]
+	}
+}
+
+func (c *LFChan) regSelect(selectInstance *SelectInstance, element unsafe.Pointer) (bool, RegInfo) {
+	try_again:
+	for { // CAS-loop
+		if selectInstance.isSelected() {
+			return false, RegInfo{}
+		}
+		enqIdx := c.enqIdx()
+		deqIdx := c.deqIdx()
+		if enqIdx < deqIdx {
+			continue try_again
+		}
+		// Check if queue is empty
+		if deqIdx == enqIdx {
+			addSuccess, regInfo := c.addToWaitingQueue(enqIdx, element, unsafe.Pointer(selectInstance))
+			if addSuccess {
+				return true, regInfo
+			} else {
+				continue try_again
+			}
+		} else {
+			// Queue is not empty
+			head := c.getHead()
+			headId := head.id
+			// check consistency
+			deqIdxNodeId := nodeId(deqIdx)
+			if headId != deqIdxNodeId {
+				if headId < deqIdxNodeId {
+					headNext := head.next()
+					headNext._prev = nil
+					c.casHead(head, headNext)
+				} else {
+					c.casDeqIdx(deqIdx, headId<<segmentSizeShift)
+				}
+				continue try_again
+			}
+			// Read the first element
+			deqIndexInHead := indexInNode(deqIdx)
+			firstElement := head.readElement(deqIndexInHead)
+			// Check that the element is not taken already.
+			if firstElement == broken {
+				c.casDeqIdx(deqIdx, deqIdx+1)
+				continue try_again
+			}
+			// Decide should we make a rendezvous or not
+			makeRendezvous := (element == ReceiverElement && firstElement != ReceiverElement) || (element != ReceiverElement && firstElement == ReceiverElement)
+			if makeRendezvous {
+				if c.tryResumeContinuationForSelect(head, deqIndexInHead, deqIdx, element, selectInstance, firstElement) {
+					return false, RegInfo{}
+				} else {
+					continue try_again
+				}
+			} else {
+				addSuccess, regInfo := c.addToWaitingQueue(enqIdx, element, unsafe.Pointer(selectInstance))
+				if addSuccess {
+					return true, regInfo
+				} else {
+					continue try_again
+				}
 			}
 		}
-		cur = curNext
-	}
-	return cur
-}
-
-func (s *segment) readContinuation(i uint32) unsafe.Pointer {
-	cont := atomic.LoadPointer(&s.data[i * 2])
-	if cont == nil {
-		if atomic.CompareAndSwapPointer(&s.data[i * 2], nil, broken) {
-			return broken
-		} else {
-			return atomic.LoadPointer(&s.data[i * 2])
-		}
-	} else {
-		return cont
-	}
-}
-
-
-// === SELECT ===
-const reg_added = uint8(0)
-const reg_rendezvous = uint8(1)
-const reg_confirmed = uint8(2)
-
-
-func (c *LFChan) regSelect(selectInstance *SelectInstance, element unsafe.Pointer) (uint8, RegInfo) {
-	if element == ReceiverElement {
-		return c.regSelectForReceive(selectInstance)
-	} else {
-		return c.regSelectForSend(selectInstance, element)
-	}
-}
-
-func (c *LFChan) regSelectForSend(selectInstance *SelectInstance, element unsafe.Pointer) (uint8, RegInfo) {
-	for {
-		head := c.head()
-		tail := c.tail()
-		senders, receivers := c.incSendersAndGetSnapshot()
-		if senders <= receivers {
-			result := c.tryResumeSelect(head, senders, element, selectInstance)
-			if result == fail { continue }
-			if result == confirmed { return reg_confirmed, RegInfo{}}
-			return reg_rendezvous, RegInfo{}
-		} else {
-			enqIdx := senders
-			tail = c.getTail(nodeId(enqIdx), tail)
-			i := indexInNode(enqIdx)
-			tail.data[i*2+1] = element
-			if !tail.casContinuation(i, nil, unsafe.Pointer(selectInstance)) {
-				// the cell is broken
-				tail.data[i*2+1] = nil
-				continue
-			}
-			return reg_added, RegInfo{tail, i}
-		}
-	}
-}
-
-func (c *LFChan) regSelectForReceive(selectInstance *SelectInstance) (uint8, RegInfo) {
-	for {
-		head := c.head()
-		tail := c.tail()
-		senders, receivers := c.incReceiversAndGetSnapshot()
-		if receivers <= senders {
-			result := c.tryResumeSelect(head, receivers, ReceiverElement, selectInstance)
-			if result == fail { continue }
-			if result == confirmed { return reg_confirmed, RegInfo{}}
-			runtime.SetGParam(selectInstance.gp, result)
-			return reg_rendezvous, RegInfo{}
-		} else {
-			enqIdx := receivers
-			tail = c.getTail(nodeId(enqIdx), tail)
-			i := indexInNode(enqIdx)
-			if !tail.casContinuation(i, nil, unsafe.Pointer(selectInstance)) {
-				// the cell is broken
-				continue
-			}
-			return reg_added, RegInfo{tail, i}
-		}
-	}
-}
-
-func (c *LFChan) tryResumeSelect(head *segment, deqIdx uint64, element unsafe.Pointer, curSelectInstance *SelectInstance) unsafe.Pointer {
-	head = c.getHead(nodeId(deqIdx), head)
-	i := indexInNode(deqIdx)
-	cont := head.readContinuation(i)
-
-	if cont == broken { return fail }
-
-	if IntType(cont) == SelectInstanceType {
-		elementToReturn := head.data[i * 2 + 1]
-		head.data[i * 2 + 1] = nil
-
-		selectInstance := (*SelectInstance) (cont)
-
-		sid := atomic.LoadUint64(&selectInstance.id)
-		if atomic.LoadPointer(&head.data[i * 2]) == broken { return fail }
-		head.data[i * 2] = broken
-
-		switch selectInstance.trySelectFromSelect(sid, curSelectInstance, unsafe.Pointer(c), element) {
-		case try_select_sucess: return elementToReturn
-		case try_select_fail: return fail
-		case try_select_confirmed: return confirmed
-		default: panic("Impossible")
-		}
-	} else {
-		elementToReturn := runtime.GetGParam(cont)
-		runtime.SetGParam(cont, element)
-		runtime.UnparkUnsafe(cont)
-		return elementToReturn
 	}
 }
 
 
 // == Cleaning ==
 
-func (s *segment) clean(index uint32) {
-	//cont := s.readContinuation(index)
-	//if cont == broken { return }
-	//if !s.casContinuation(index, cont, broken) { return }
+func (s *segment) clean(index int32) {
+	cont, _ := s.readContinuation(index)
+	if cont == broken { return }
+	if !s.casContinuation(index, cont, broken) { return }
 	atomic.StorePointer(&s.data[index * 2], broken)
-	s.data[index * 2 + 1] = nil
 	if atomic.AddUint32(&s._cleaned, 1) < segmentSize { return }
-	// Remove the segment
+	// Remove the node
 	s.remove()
 }
 
@@ -392,7 +458,49 @@ func (n *segment) moveNextToTheRight(newNext *segment) {
 func (n *segment) movePrevToTheLeft(newPrev *segment) {
 	for {
 		curPrev := n.prev()
+		if curPrev == nil { return }
 		if newPrev != nil && curPrev.id <= newPrev.id { return }
 		if n.casPrev(unsafe.Pointer(curPrev), unsafe.Pointer(newPrev)) { return }
 	}
+}
+
+
+func (c *LFChan) casEnqIdx(old int64, new int64) bool {
+	return atomic.CompareAndSwapInt64(&c._enqIdx, old, new)
+}
+
+func (c *LFChan) casDeqIdx(old int64, new int64) bool {
+	return atomic.CompareAndSwapInt64(&c._deqIdx, old, new)
+}
+
+func (c *LFChan) enqIdx() int64 {
+	return atomic.LoadInt64(&c._enqIdx)
+}
+
+func (c *LFChan) deqIdx() int64 {
+	return atomic.LoadInt64(&c._deqIdx)
+}
+
+func (c *LFChan) getTail() *segment {
+	return (*segment) (atomic.LoadPointer(&c._tail))
+}
+
+func (c *LFChan) getHead() *segment {
+	return (*segment) (atomic.LoadPointer(&c._head))
+}
+
+func (c *LFChan) casHead(oldHead *segment, newHead *segment) bool {
+	return atomic.CompareAndSwapPointer(&c._head, (unsafe.Pointer) (oldHead), (unsafe.Pointer) (newHead))
+}
+
+func (n *segment) casContinuation(index int32, old, new unsafe.Pointer) bool {
+	return atomic.CompareAndSwapPointer(&n.data[index * 2 + 1], old, new)
+}
+
+func (n *segment) setContinuation(index int32, cont unsafe.Pointer) {
+	atomic.StorePointer(&n.data[index * 2 + 1], cont)
+}
+
+func (c *LFChan) casTail(oldTail *segment, newTail *segment) bool {
+	return atomic.CompareAndSwapPointer(&c._tail, (unsafe.Pointer) (oldTail), (unsafe.Pointer) (newTail))
 }
