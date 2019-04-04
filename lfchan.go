@@ -94,13 +94,35 @@ func (c *LFChan) Send(element unsafe.Pointer) {
 }
 
 func (c *LFChan) Receive() unsafe.Pointer {
+	startHead := c.head()
+	startTail := c.tail()
+
+	senders, receivers, startBufferEnd := c.incReceiversAndBufferEndAndGetSnapshot()
+	if receivers <= senders {
+		result := c.tryResumeSimple(startHead, receivers, ReceiverElement)
+		if result != fail {
+			if senders >= startBufferEnd { c.resumeNextWaitingSend0(startHead, startBufferEnd) }
+			return result
+		}
+	} else {
+		curG := runtime.GetGoroutine()
+		c.storeWaiter(startTail, receivers, ReceiverElement, curG)
+		runtime.ParkUnsafe(curG)
+		res := runtime.GetGParam(curG)
+		runtime.SetGParam(curG, nil)
+		return res
+	}
+
 	for {
 		head := c.head()
 		tail := c.tail()
 		senders, receivers, _ := c.incReceiversAndGetSnapshot()
 		if receivers <= senders {
 			result := c.tryResumeSimple(head, receivers, ReceiverElement)
-			if result != fail { return result }
+			if result != fail {
+				if senders >= startBufferEnd { c.resumeNextWaitingSend0(startHead, startBufferEnd) }
+				return result
+			}
 		} else {
 			curG := runtime.GetGoroutine()
 			c.storeWaiter(tail, receivers, ReceiverElement, curG)
@@ -112,10 +134,47 @@ func (c *LFChan) Receive() unsafe.Pointer {
 	}
 }
 
+func (c *LFChan) resumeNextWaitingSend0(startHead *segment, startBufferEnd uint64) {
+	segment := c.findOrCreateNode(nodeId(startBufferEnd), startHead)
+	i := indexInNode(startBufferEnd)
+	if c.makeBuffered(i, segment) { return }
+	c.resumeNextWaitingSend()
+}
+
+func (c *LFChan) resumeNextWaitingSend() {
+	segment := c.head()
+	for {
+		senders, _, bufferEnd := c.incBufferEndAndGetSnapshot()
+		if senders < bufferEnd { return }
+		segment = c.findOrCreateNode(nodeId(bufferEnd), segment)
+		i := indexInNode(bufferEnd)
+		if c.makeBuffered(i, segment) { return }
+	}
+}
+
+// return true if we should finish
+func (c *LFChan) makeBuffered(i uint32, s *segment) bool {
+	w := s.readContinuation(i, resuming)
+	el := s.data[i * 2]
+	if el == ReceiverElement { return true }
+	if w == done || w == buffered { return true }
+
+	if IntType(w) != SelectInstanceType {
+		runtime.UnparkUnsafe(w)
+		atomic.StorePointer(&s.data[i * 2 + 1], buffered)
+		return true
+	} else {
+		selectInstance := (*SelectInstance)(w)
+		sid := selectInstance.id
+		if selectInstance.trySelectSimple(sid, c, ReceiverElement) { return true }
+	}
+	return false
+}
+
 func (c *LFChan) tryResumeSimple(head *segment, deqIdx uint64, element unsafe.Pointer) unsafe.Pointer {
 	head = c.getHead(nodeId(deqIdx), head)
 	i := indexInNode(deqIdx)
-	cont := head.readContinuation(i)
+	cont := head.readContinuation(i, done)
 
 	if cont == done { return fail }
 	res := head.data[i * 2]
@@ -172,7 +231,7 @@ func (c *LFChan) findOrCreateNode(id uint64, cur *segment) *segment {
 	return cur
 }
 
-func (s *segment) readContinuation(i uint32) unsafe.Pointer {
+func (s *segment) readContinuation(i uint32, replacement unsafe.Pointer) unsafe.Pointer {
 	x := 0
 	for {
 		cont := atomic.LoadPointer(&s.data[i * 2 + 1])
@@ -182,7 +241,7 @@ func (s *segment) readContinuation(i uint32) unsafe.Pointer {
 			continue
 		}
 		if cont == done { return done }
-		if atomic.CompareAndSwapPointer(&s.data[i * 2 + 1], cont, done) { return cont }
+		if atomic.CompareAndSwapPointer(&s.data[i * 2 + 1], cont, replacement) { return cont }
 	}
 }
 
@@ -244,7 +303,7 @@ func (c *LFChan) regSelectForReceive(selectInstance *SelectInstance) (uint8, Reg
 func (c *LFChan) tryResumeSelect(head *segment, deqIdx uint64, element unsafe.Pointer, curSelectInstance *SelectInstance) unsafe.Pointer {
 	head = c.getHead(nodeId(deqIdx), head)
 	i := indexInNode(deqIdx)
-	cont := head.readContinuation(i)
+	cont := head.readContinuation(i, done)
 
 	if cont == done { return fail }
 	res := head.data[i * 2]
