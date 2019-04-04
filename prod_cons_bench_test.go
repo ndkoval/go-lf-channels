@@ -13,7 +13,7 @@ import (
 	"unsafe"
 )
 
-const capacity = 32
+const capacity = 0
 const newAlgo = true
 const useProfiler = true
 const approxBatchSize = 100000

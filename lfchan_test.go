@@ -125,9 +125,9 @@ func TestStress(t *testing.T) {
 
 func TestStressWithSelectOnReceive(t *testing.T) { // TODO
 	n := 500000
-	k := 1
+	k := 10
 	c := NewLFChan(capacity)
-	//dummy := NewLFChan(capacity)
+	dummy := NewLFChan(capacity)
 	wg := sync.WaitGroup{}
 	// Run sender
 	for sender := 0; sender < k; sender++ {
@@ -156,11 +156,11 @@ func TestStressWithSelectOnReceive(t *testing.T) { // TODO
 							}
 						},
 					},
-					//SelectAlternative{
-					//	channel: dummy,
-					//	element: ReceiverElement,
-					//	action: func (result unsafe.Pointer) { t.Fatal("Impossible") },
-					//},
+					SelectAlternative{
+						channel: dummy,
+						element: ReceiverElement,
+						action: func (result unsafe.Pointer) { t.Fatal("Impossible") },
+					},
 				)
 			}
 		}()
@@ -232,7 +232,7 @@ func TestStressSelectsOver2Channels(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for i := 0; i < n; i++ {
-				SelectUnbiased(
+				Select(
 					SelectAlternative{
 						channel: c1,
 						element: IntToUnsafePointer(i),

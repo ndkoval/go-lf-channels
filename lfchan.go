@@ -6,9 +6,11 @@ import (
 	"unsafe"
 )
 
-var broken = (unsafe.Pointer) ((uintptr) (1))
+var done = (unsafe.Pointer) ((uintptr) (1))
 var fail = (unsafe.Pointer) ((uintptr) (2))
 var confirmed = unsafe.Pointer(uintptr(3))
+var buffered = unsafe.Pointer(uintptr(4))
+var resuming = unsafe.Pointer(uintptr(5))
 
 
 // == Channel structure ==
@@ -16,9 +18,14 @@ var confirmed = unsafe.Pointer(uintptr(3))
 const LFChanType int32 = 1094645093
 type LFChan struct {
 	__type 	     int32
+	capacity uint64
+
 	lock    uint32
-	highest uint64
 	lowest  uint64
+	hSenders uint64
+	hReceivers uint64
+	hBufferEnd uint64
+
 	_head    unsafe.Pointer
 	_tail    unsafe.Pointer
 }
@@ -27,6 +34,8 @@ func NewLFChan(capacity uint64) *LFChan {
 	node := unsafe.Pointer(newNode(0, nil))
 	return &LFChan{
 		__type: LFChanType,
+		capacity: capacity,
+		lowest: capacity << (2 * _counterOffset), // TODO fix overflowing here
 		_head:    node,
 		_tail:    node,
 	}
@@ -69,11 +78,17 @@ func (c *LFChan) Send(element unsafe.Pointer) {
 	for {
 		head := c.head()
 		tail := c.tail()
-		senders, receivers := c.incSendersAndGetSnapshot()
+		senders, receivers, bufferEnd := c.incSendersAndGetSnapshot()
 		if senders <= receivers {
-			if c.tryResumeSimpleSend(head, senders, element) { return }
+			if c.tryResumeSimple(head, senders, element) != fail { return }
+		} else if senders <= bufferEnd {
+			c.storeWaiter(tail, senders, element, buffered)
+			return
 		} else {
-			if c.trySuspendAndReturnSend(tail, senders, element) { return }
+			curG := runtime.GetGoroutine()
+			c.storeWaiter(tail, senders, element, curG)
+			runtime.ParkUnsafe(curG)
+			return
 		}
 	}
 }
@@ -82,121 +97,48 @@ func (c *LFChan) Receive() unsafe.Pointer {
 	for {
 		head := c.head()
 		tail := c.tail()
-		senders, receivers := c.incReceiversAndGetSnapshot()
+		senders, receivers, _ := c.incReceiversAndGetSnapshot()
 		if receivers <= senders {
-			result := c.tryResumeSimpleReceive(head, receivers)
-			if result != fail {
-				return result
-			}
+			result := c.tryResumeSimple(head, receivers, ReceiverElement)
+			if result != fail { return result }
 		} else {
-			result := c.trySuspendAndReturnReceive(tail, receivers)
-			if result != fail {
-				return result
-			}
+			curG := runtime.GetGoroutine()
+			c.storeWaiter(tail, receivers, ReceiverElement, curG)
+			runtime.ParkUnsafe(curG)
+			res := runtime.GetGParam(curG)
+			runtime.SetGParam(curG, nil)
+			return res
 		}
 	}
 }
 
-func (c *LFChan) tryResumeSimpleSend(head *segment, deqIdx uint64, element unsafe.Pointer) bool {
+func (c *LFChan) tryResumeSimple(head *segment, deqIdx uint64, element unsafe.Pointer) unsafe.Pointer {
 	head = c.getHead(nodeId(deqIdx), head)
 	i := indexInNode(deqIdx)
 	cont := head.readContinuation(i)
 
-	if cont == broken { return false }
+	if cont == done { return fail }
+	res := head.data[i * 2]
+	head.data[i * 2] = nil
+
+	if cont == buffered { return res }
 
 	if IntType(cont) != SelectInstanceType {
-		head.data[i * 2] = broken
 		runtime.SetGParam(cont, element)
 		runtime.UnparkUnsafe(cont)
-		return true
+		return res
 	} else {
 		selectInstance := (*SelectInstance)(cont)
-
-		sid := atomic.LoadUint64(&selectInstance.id)
-		if atomic.LoadPointer(&head.data[i * 2]) == broken { return false }
-		head.data[i * 2] = broken
-
-		if selectInstance.trySelectSimple(sid, c, element) {
-			return true
-		} else {
-			return false
-		}
+		sid := selectInstance.id
+		if selectInstance.trySelectSimple(sid, c, element) { return res } else { return fail }
 	}
 }
 
-func (c *LFChan) tryResumeSimpleReceive(head *segment, deqIdx uint64) unsafe.Pointer {
-	head = c.getHead(nodeId(deqIdx), head)
-	i := indexInNode(deqIdx)
-	cont := head.readContinuation(i)
-
-	if cont == broken { return fail }
-
-	if IntType(cont) != SelectInstanceType {
-		head.data[i * 2] = broken
-		elementToReturn := runtime.GetGParam(cont)
-		runtime.UnparkUnsafe(cont)
-		return elementToReturn
-	} else {
-		elementToReturn := head.data[i * 2 + 1]
-		head.data[i * 2 + 1] = nil
-		selectInstance := (*SelectInstance)(cont)
-
-		sid := atomic.LoadUint64(&selectInstance.id)
-		if atomic.LoadPointer(&head.data[i * 2]) == broken { return fail }
-		head.data[i * 2] = broken
-
-		if selectInstance.trySelectSimple(sid, c, ReceiverElement) {
-			return elementToReturn
-		} else {
-			return fail
-		}
-	}
-}
-
-func (c *LFChan) trySuspendAndReturnReceive(tail *segment, enqIdx uint64) unsafe.Pointer {
+func (c *LFChan) storeWaiter(tail *segment, enqIdx uint64, element unsafe.Pointer, waiter unsafe.Pointer) {
 	tail = c.getTail(nodeId(enqIdx), tail)
 	i := indexInNode(enqIdx)
-	curG := runtime.GetGoroutine()
-	if atomic.LoadPointer(&tail.data[i * 2]) != nil { return fail }
-	if !tail.casContinuation(i, nil, curG) {
-		// the cell is broken
-		return fail
-	}
-	runtime.ParkUnsafe(curG)
-	result := runtime.GetGParam(curG)
-	runtime.SetGParam(curG, nil)
-	return result
-}
-
-func (c *LFChan) trySuspendAndReturnSend(tail *segment, enqIdx uint64, element unsafe.Pointer) bool {
-	tail = c.getTail(nodeId(enqIdx), tail)
-	i := indexInNode(enqIdx)
-	curG := runtime.GetGoroutine()
-	if atomic.LoadPointer(&tail.data[i * 2]) != nil { return false }
-	runtime.SetGParam(curG, element)
-	if !tail.casContinuation(i, nil, curG) {
-		// the cell is broken
-		runtime.SetGParam(curG, nil)
-		return false
-	}
-	runtime.ParkUnsafe(curG)
-	return true
-}
-
-func (c *LFChan) trySuspendAndReturn(tail *segment, enqIdx uint64, element unsafe.Pointer) unsafe.Pointer {
-	tail = c.getTail(nodeId(enqIdx), tail)
-	i := indexInNode(enqIdx)
-	tail.data[i * 2 + 1] = element
-	curG := runtime.GetGoroutine()
-	if !tail.casContinuation(i, nil, curG) {
-		// the cell is broken
-		tail.data[i * 2 + 1] = nil
-		return fail
-	}
-	runtime.ParkUnsafe(curG)
-	result := runtime.GetGParam(curG)
-	runtime.SetGParam(curG, nil)
-	return result
+	tail.data[i * 2] = element
+	atomic.StorePointer(&tail.data[i * 2 + 1], waiter)
 }
 
 func (c *LFChan) getHead(id uint64, cur *segment) *segment {
@@ -231,15 +173,16 @@ func (c *LFChan) findOrCreateNode(id uint64, cur *segment) *segment {
 }
 
 func (s *segment) readContinuation(i uint32) unsafe.Pointer {
-	cont := atomic.LoadPointer(&s.data[i * 2])
-	if cont == nil {
-		if atomic.CompareAndSwapPointer(&s.data[i * 2], nil, broken) {
-			return broken
-		} else {
-			return atomic.LoadPointer(&s.data[i * 2])
+	x := 0
+	for {
+		cont := atomic.LoadPointer(&s.data[i * 2 + 1])
+		if cont == nil || cont == resuming {
+			x++;
+			if x % 10000 == 0 { runtime.Gosched() }
+			continue
 		}
-	} else {
-		return cont
+		if cont == done { return done }
+		if atomic.CompareAndSwapPointer(&s.data[i * 2 + 1], cont, done) { return cont }
 	}
 }
 
@@ -262,23 +205,19 @@ func (c *LFChan) regSelectForSend(selectInstance *SelectInstance, element unsafe
 	for {
 		head := c.head()
 		tail := c.tail()
-		senders, receivers := c.incSendersAndGetSnapshot()
+		senders, receivers, bufferEnd := c.incSendersAndGetSnapshot()
 		if senders <= receivers {
 			result := c.tryResumeSelect(head, senders, element, selectInstance)
 			if result == fail { continue }
 			if result == confirmed { return reg_confirmed, RegInfo{}}
 			return reg_rendezvous, RegInfo{}
+		} else if senders <= bufferEnd {
+			c.storeWaiter(tail, senders, element, buffered)
+			return reg_rendezvous, RegInfo{}
 		} else {
-			enqIdx := senders
-			tail = c.getTail(nodeId(enqIdx), tail)
-			i := indexInNode(enqIdx)
-			tail.data[i*2+1] = element
-			if !tail.casContinuation(i, nil, unsafe.Pointer(selectInstance)) {
-				// the cell is broken
-				tail.data[i*2+1] = nil
-				continue
-			}
-			return reg_added, RegInfo{tail, i}
+			tail = c.getTail(nodeId(senders), tail)
+			c.storeWaiter(tail, senders, element, unsafe.Pointer(selectInstance))
+			return reg_added, RegInfo{tail, indexInNode(senders)}
 		}
 	}
 }
@@ -287,7 +226,7 @@ func (c *LFChan) regSelectForReceive(selectInstance *SelectInstance) (uint8, Reg
 	for {
 		head := c.head()
 		tail := c.tail()
-		senders, receivers := c.incReceiversAndGetSnapshot()
+		senders, receivers, _ := c.incReceiversAndGetSnapshot()
 		if receivers <= senders {
 			result := c.tryResumeSelect(head, receivers, ReceiverElement, selectInstance)
 			if result == fail { continue }
@@ -295,14 +234,9 @@ func (c *LFChan) regSelectForReceive(selectInstance *SelectInstance) (uint8, Reg
 			runtime.SetGParam(selectInstance.gp, result)
 			return reg_rendezvous, RegInfo{}
 		} else {
-			enqIdx := receivers
-			tail = c.getTail(nodeId(enqIdx), tail)
-			i := indexInNode(enqIdx)
-			if !tail.casContinuation(i, nil, unsafe.Pointer(selectInstance)) {
-				// the cell is broken
-				continue
-			}
-			return reg_added, RegInfo{tail, i}
+			tail = c.getTail(nodeId(receivers), tail)
+			c.storeWaiter(tail, receivers, ReceiverElement, unsafe.Pointer(selectInstance))
+			return reg_added, RegInfo{tail, indexInNode(receivers)}
 		}
 	}
 }
@@ -312,29 +246,26 @@ func (c *LFChan) tryResumeSelect(head *segment, deqIdx uint64, element unsafe.Po
 	i := indexInNode(deqIdx)
 	cont := head.readContinuation(i)
 
-	if cont == broken { return fail }
+	if cont == done { return fail }
+	res := head.data[i * 2]
+	head.data[i * 2] = nil
+
+	if cont == buffered { return res }
 
 	if IntType(cont) == SelectInstanceType {
-		elementToReturn := head.data[i * 2 + 1]
-		head.data[i * 2 + 1] = nil
-
 		selectInstance := (*SelectInstance) (cont)
 
 		sid := atomic.LoadUint64(&selectInstance.id)
-		if atomic.LoadPointer(&head.data[i * 2]) == broken { return fail }
-		head.data[i * 2] = broken
-
 		switch selectInstance.trySelectFromSelect(sid, curSelectInstance, unsafe.Pointer(c), element) {
-		case try_select_sucess: return elementToReturn
+		case try_select_sucess: return res
 		case try_select_fail: return fail
 		case try_select_confirmed: return confirmed
 		default: panic("Impossible")
 		}
 	} else {
-		elementToReturn := runtime.GetGParam(cont)
 		runtime.SetGParam(cont, element)
 		runtime.UnparkUnsafe(cont)
-		return elementToReturn
+		return res
 	}
 }
 
@@ -345,8 +276,8 @@ func (s *segment) clean(index uint32) {
 	//cont := s.readContinuation(index)
 	//if cont == broken { return }
 	//if !s.casContinuation(index, cont, broken) { return }
-	atomic.StorePointer(&s.data[index * 2], broken)
-	s.data[index * 2 + 1] = nil
+	atomic.StorePointer(&s.data[index * 2 + 1], done)
+	s.data[index * 2] = nil
 	if atomic.AddUint32(&s._cleaned, 1) < segmentSize { return }
 	// Remove the segment
 	s.remove()
