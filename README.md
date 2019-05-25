@@ -1,3 +1,0 @@
-Lock-free channel prototype
-===========================
-
