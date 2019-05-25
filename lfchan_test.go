@@ -271,55 +271,6 @@ func TestStressSelectsOver2Channels(t *testing.T) {
 	wg.Wait()
 }
 
-func testCancellation(t *testing.T) {
-	c := NewLFChan()
-	dummy := NewLFChan()
-	n := 100000
-	k := 50
-	// Add first element to the dummy channel
-	go func() {
-		dummy.Receive()
-	}()
-	// Run parallel receiver with selecting on dummy channel as well.
-	for i := 0; i < k; i++ {
-		go func() {
-			for j := 0; j < n; j++ {
-				Select(
-					SelectAlternative{
-						channel: dummy,
-						element: ReceiverElement,
-						action: func (result unsafe.Pointer) { t.Fatal("Impossible") },
-					},
-					SelectAlternative{
-						channel: c,
-						element: ReceiverElement,
-						action: func (result unsafe.Pointer) {},
-					},
-				)
-			}
-		}()
-	}
-	// Send n*k elements to the channel
-	for i := 0; i < n * k; i++ {
-		c.SendInt(1)
-	}
-	// After this all nodes except for head and tail should be removed from
-	// the dummy channel. Wait for a bit at first.
-	//head := dummy.head()
-	//headNext := (*segment) (head.next())
-	//tail := dummy.tail()
-	//if head == tail || headNext == tail { return }
-	//
-	//cur := head
-	//for cur.next() != tail {
-	//	println(cur.id)
-	//	cur = cur.next()
-	//}
-	//println(tail.id)
-
-	t.Fatal("Channel contains empy nodes which are niether head or tail:")
-}
-
 func IntToUnsafePointer(x int) unsafe.Pointer {
 	return (unsafe.Pointer)((uintptr)(x + 6000))
 }

@@ -52,6 +52,8 @@ func (s *SelectInstance) doSelect(alternatives []SelectAlternative) {
 }
 
 func (s *SelectInstance) selectAlternative(alternatives []SelectAlternative) (result unsafe.Pointer, alternative SelectAlternative, reginfos [2]RegInfo) {
+	// TODO: in real world the compiler is able count the number of clauses,
+	// TODO: we use at most 2 clauses in our tests and don't have access to compiler
 	reginfos = [2]RegInfo{}
 	for i, alt := range alternatives {
 		added, regInfo := alt.channel.regSelect(s, alt.element)
@@ -212,6 +214,16 @@ func (s *SelectInstance) trySetDescriptor(desc unsafe.Pointer) bool {
 	}
 }
 
+
+
+
+
+
+
+
+
+
+
 func (sd *SelectDesc) getStatus() int32 {
 	return atomic.LoadInt32(&sd.status)
 }
@@ -237,6 +249,6 @@ func (s *SelectInstance) casState(old, new unsafe.Pointer) bool {
 }
 
 func IntType(p unsafe.Pointer) int32 {
-	if p == nil { panic( "XXX") }
+	if p == nil { panic( "WTF??!") }
 	return *(*int32)(p)
 }

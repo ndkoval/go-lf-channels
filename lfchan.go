@@ -465,6 +465,18 @@ func (n *segment) movePrevToTheLeft(newPrev *segment) {
 }
 
 
+
+
+
+
+
+
+
+
+
+
+
+
 func (c *LFChan) casEnqIdx(old int64, new int64) bool {
 	return atomic.CompareAndSwapInt64(&c._enqIdx, old, new)
 }
