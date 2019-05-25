@@ -2,10 +2,7 @@ package main
 
 import (
 	"fmt"
-	"log"
-	"os"
 	"runtime"
-	"runtime/pprof"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -13,7 +10,6 @@ import (
 	"unsafe"
 )
 
-const useProfiler = false
 const approxBatchSize = 100000
 
 var parallelism = []int{1, 2, 4, 8, 16, 32, 64, 128, 144} // number of scheduler threads
@@ -67,15 +63,6 @@ func BenchmarkNN(b *testing.B) {
 }
 
 func runBenchmark(b *testing.B, producers int, consumers int, parallelism int, withSelect bool, work int, newAlgo bool) {
-	if useProfiler {
-		runtime.SetCPUProfileRate(1000)
-		f, err := os.Create(fmt.Sprintf("cur_S%tT%dW%d.pprof", withSelect, parallelism, work))
-		if err != nil {
-			log.Fatal(err)
-		}
-		pprof.StartCPUProfile(f)
-		defer pprof.StopCPUProfile()
-	}
 	runtime.GC()
 	// Set benchmark parameters
 	n := (approxBatchSize) / producers * producers

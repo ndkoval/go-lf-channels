@@ -320,3 +320,18 @@ func testCancellation(t *testing.T) {
 	t.Fatal("Channel contains empy nodes which are niether head or tail:")
 }
 
+func IntToUnsafePointer(x int) unsafe.Pointer {
+	return (unsafe.Pointer)((uintptr)(x + 6000))
+}
+
+func UnsafePointerToInt(p unsafe.Pointer) int {
+	return (int) ((uintptr) (p)) - 6000
+}
+
+func (c *LFChan) SendInt(element int) {
+	c.Send(IntToUnsafePointer(element))
+}
+
+func (c *LFChan) ReceiveInt() int {
+	return UnsafePointerToInt(c.Receive())
+}
