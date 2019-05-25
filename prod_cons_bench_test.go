@@ -12,7 +12,8 @@ import (
 
 const approxBatchSize = 100000
 
-var parallelism = []int{1, 2, 4, 8, 16, 32, 64, 128, 144} // number of scheduler threads
+var parallelism = []int{1, 2, 4} // number of scheduler threads
+//var parallelism = []int{1, 2, 4, 8, 16, 32, 64, 128, 144} // number of scheduler threads
 var goroutines = []int{0, 1000} // 0 -- number of scheduler threads
 var work = []int{100} // an additional work size (parameter for `consumeCPU`) for each operation
 
@@ -29,7 +30,7 @@ func BenchmarkN1(b *testing.B) {
 					}
 					// Then run benchmarks
 					for times := 0; times < 10; times++ {
-						runBenchmark(b, producers, consumers, parallelism, withSelect, work, newAlgo)
+						runBenchmark(b, producers, consumers, 0, parallelism, withSelect, work, newAlgo)
 					}
 				}
 			}
@@ -53,7 +54,7 @@ func BenchmarkNN(b *testing.B) {
 						consumers = producers
 						// Then run benchmarks
 						for times := 0; times < 10; times++ {
-							runBenchmark(b, producers, consumers, parallelism, withSelect, work, newAlgo)
+							runBenchmark(b, producers, consumers, goroutines, parallelism, withSelect, work, newAlgo)
 						}
 					}
 				}
@@ -62,13 +63,13 @@ func BenchmarkNN(b *testing.B) {
 	}
 }
 
-func runBenchmark(b *testing.B, producers int, consumers int, parallelism int, withSelect bool, work int, newAlgo bool) {
+func runBenchmark(b *testing.B, producers int, consumers int, goroutinesCfg int, parallelism int, withSelect bool, work int, newAlgo bool) {
 	runtime.GC()
 	// Set benchmark parameters
 	n := (approxBatchSize) / producers * producers
 	// Do producer-consumer work in goroutines
 	b.Run(fmt.Sprintf("newAlgo=%t/withSelect=%t/work=%d/goroutines=%d/threads=%d",
-		newAlgo, withSelect, work, producers + consumers, parallelism),
+		newAlgo, withSelect, work, goroutinesCfg, parallelism),
 		func(b *testing.B) {
 			runtime.GOMAXPROCS(parallelism)
 			b.N = n
