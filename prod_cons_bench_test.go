@@ -13,9 +13,7 @@ import (
 	"unsafe"
 )
 
-const capacity = 32
-const newAlgo = true
-const useProfiler = true
+const useProfiler = false
 const approxBatchSize = 100000
 
 var parallelism = []int{1, 2, 4, 8, 16, 32, 64, 128, 144} // number of scheduler threads
@@ -24,17 +22,19 @@ var work = []int{100} // an additional work size (parameter for `consumeCPU`) fo
 
 // Multiple producer single consumer
 func BenchmarkN1(b *testing.B) {
-	for _, withSelect := range [...]bool{false, true} {
-		for _, work := range work {
-			for _, parallelism := range parallelism {
-				consumers := 1
-				producers := parallelism - 1
-				if producers == 0 {
-					producers = 1
-				}
-				// Then run benchmarks
-				for times := 0; times < 10; times++ {
-					runBenchmark(b, producers, consumers, parallelism, withSelect, work)
+	for _, newAlgo := range [...]bool{false, true} {
+		for _, withSelect := range [...]bool{false, true} {
+			for _, work := range work {
+				for _, parallelism := range parallelism {
+					consumers := 1
+					producers := parallelism - 1
+					if producers == 0 {
+						producers = 1
+					}
+					// Then run benchmarks
+					for times := 0; times < 10; times++ {
+						runBenchmark(b, producers, consumers, parallelism, withSelect, work, newAlgo)
+					}
 				}
 			}
 		}
@@ -43,20 +43,22 @@ func BenchmarkN1(b *testing.B) {
 
 // Multiple producer multiple consumer
 func BenchmarkNN(b *testing.B) {
-	for _, withSelect := range [...]bool{false, true} {
-		for _, work := range work {
-			for _, goroutines := range goroutines {
-				for _, parallelism := range parallelism {
-					var producers, consumers int
-					if goroutines == 0 {
-						producers = (parallelism + 1) / 2
-					} else {
-						producers = goroutines / 2
-					}
-					consumers = producers
-					// Then run benchmarks
-					for times := 0; times < 10; times++ {
-						runBenchmark(b, producers, consumers, parallelism, withSelect, work)
+	for _, newAlgo := range [...]bool{false, true} {
+		for _, withSelect := range [...]bool{false, true} {
+			for _, work := range work {
+				for _, goroutines := range goroutines {
+					for _, parallelism := range parallelism {
+						var producers, consumers int
+						if goroutines == 0 {
+							producers = (parallelism + 1) / 2
+						} else {
+							producers = goroutines / 2
+						}
+						consumers = producers
+						// Then run benchmarks
+						for times := 0; times < 10; times++ {
+							runBenchmark(b, producers, consumers, parallelism, withSelect, work, newAlgo)
+						}
 					}
 				}
 			}
@@ -64,7 +66,7 @@ func BenchmarkNN(b *testing.B) {
 	}
 }
 
-func runBenchmark(b *testing.B, producers int, consumers int, parallelism int, withSelect bool, work int) {
+func runBenchmark(b *testing.B, producers int, consumers int, parallelism int, withSelect bool, work int, newAlgo bool) {
 	if useProfiler {
 		runtime.SetCPUProfileRate(1000)
 		f, err := os.Create(fmt.Sprintf("cur_S%tT%dW%d.pprof", withSelect, parallelism, work))
@@ -78,8 +80,8 @@ func runBenchmark(b *testing.B, producers int, consumers int, parallelism int, w
 	// Set benchmark parameters
 	n := (approxBatchSize) / producers * producers
 	// Do producer-consumer work in goroutines
-	b.Run(fmt.Sprintf("withSelect=%t/work=%d/goroutines=%d/threads=%d",
-		withSelect, work, producers + consumers, parallelism),
+	b.Run(fmt.Sprintf("newAlgo=%t/withSelect=%t/work=%d/goroutines=%d/threads=%d",
+		newAlgo, withSelect, work, producers + consumers, parallelism),
 		func(b *testing.B) {
 			runtime.GOMAXPROCS(parallelism)
 			b.N = n
@@ -95,7 +97,7 @@ func runBenchmark(b *testing.B, producers int, consumers int, parallelism int, w
 func runBenchmarkGo(n int, producers int, consumers int, withSelect bool, work int) {
 	wg := sync.WaitGroup{}
 	wg.Add(producers + consumers)
-	c := make(chan int, capacity)
+	c := make(chan int, 0)
 	// Run producers
 	for i := 0; i < producers; i++ {
 		go func() {
@@ -140,13 +142,13 @@ func runBenchmarkGo(n int, producers int, consumers int, withSelect bool, work i
 func runBenchmarkKoval(n int, producers int, consumers int, withSelect bool, work int) {
 	wg := sync.WaitGroup{}
 	wg.Add(producers + consumers)
-	c := NewLFChan(capacity)
+	c := NewLFChan()
 	// Run producers
 	for i := 0; i < producers; i++ {
 		go func() {
 			defer wg.Done()
 			var dummyChan *LFChan
-			if withSelect { dummyChan = NewLFChan(0) }
+			if withSelect { dummyChan = NewLFChan() }
 			alts := []SelectAlternative{
 				{
 					channel: c,
@@ -174,7 +176,7 @@ func runBenchmarkKoval(n int, producers int, consumers int, withSelect bool, wor
 		go func() {
 			defer wg.Done()
 			var dummyChan *LFChan
-			if withSelect { dummyChan = NewLFChan(0) }
+			if withSelect { dummyChan = NewLFChan() }
 			alts := []SelectAlternative{
 				{
 					channel: c,

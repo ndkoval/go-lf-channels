@@ -8,7 +8,7 @@ import (
 
 func TestSimple(t *testing.T) {
 	// Run sender
-	c := NewLFChan(capacity)
+	c := NewLFChan()
 	go func() {
 		c.SendInt(10)
 	}()
@@ -18,8 +18,8 @@ func TestSimple(t *testing.T) {
 }
 
 func TestSimpleSendAndReceiveWithSelect(t *testing.T) {
-	c1 := NewLFChan(capacity)
-	dummy := NewLFChan(capacity)
+	c1 := NewLFChan()
+	dummy := NewLFChan()
 	N := 1000
 	// Run sender
 	go func() {
@@ -50,8 +50,8 @@ func TestSimpleSendAndReceiveWithSelect(t *testing.T) {
 }
 
 func TestSimpleSelects(t *testing.T) {
-	c1 := NewLFChan(capacity)
-	c2 := NewLFChan(capacity)
+	c1 := NewLFChan()
+	c2 := NewLFChan()
 	N := 1000
 	// Run sender
 	go func() {
@@ -95,7 +95,7 @@ func TestSimpleSelects(t *testing.T) {
 func TestStress(t *testing.T) {
 	n := 500000
 	k := 10
-	c := NewLFChan(capacity)
+	c := NewLFChan()
 	wg := sync.WaitGroup{}
 	// Run sender
 	for xxx := 0; xxx < k; xxx++ {
@@ -126,7 +126,7 @@ func TestStress(t *testing.T) {
 func TestStressWithSelectOnReceive(t *testing.T) { // TODO
 	n := 500000
 	k := 1
-	c := NewLFChan(capacity)
+	c := NewLFChan()
 	//dummy := NewLFChan(capacity)
 	wg := sync.WaitGroup{}
 	// Run sender
@@ -171,8 +171,8 @@ func TestStressWithSelectOnReceive(t *testing.T) { // TODO
 func TestStressSelects(t *testing.T) {
 	n := 500000
 	k := 10
-	c := NewLFChan(capacity)
-	dummy := NewLFChan(capacity)
+	c := NewLFChan()
+	dummy := NewLFChan()
 	wg := sync.WaitGroup{}
 	// Run sender
 	for sender := 0; sender < k; sender++ {
@@ -223,8 +223,8 @@ func TestStressSelects(t *testing.T) {
 func TestStressSelectsOver2Channels(t *testing.T) {
 	n := 500000
 	k := 10
-	c1 := NewLFChan(capacity)
-	c2 := NewLFChan(capacity)
+	c1 := NewLFChan()
+	c2 := NewLFChan()
 	wg := sync.WaitGroup{}
 	// Run sender
 	for sender := 0; sender < k; sender++ {
@@ -272,8 +272,8 @@ func TestStressSelectsOver2Channels(t *testing.T) {
 }
 
 func testCancellation(t *testing.T) {
-	c := NewLFChan(capacity)
-	dummy := NewLFChan(capacity)
+	c := NewLFChan()
+	dummy := NewLFChan()
 	n := 100000
 	k := 50
 	// Add first element to the dummy channel

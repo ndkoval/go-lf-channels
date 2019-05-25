@@ -19,7 +19,7 @@ type LFChan struct {
 	_tail    unsafe.Pointer
 }
 
-func NewLFChan(capacity uint64) *LFChan {
+func NewLFChan() *LFChan {
 	emptyNode := (unsafe.Pointer) (newNode(0, nil))
 	c := &LFChan{
 		_deqIdx: 1,
@@ -503,4 +503,20 @@ func (n *segment) setContinuation(index int32, cont unsafe.Pointer) {
 
 func (c *LFChan) casTail(oldTail *segment, newTail *segment) bool {
 	return atomic.CompareAndSwapPointer(&c._tail, (unsafe.Pointer) (oldTail), (unsafe.Pointer) (newTail))
+}
+
+func (n *segment) next() *segment {
+	return (*segment)(atomic.LoadPointer(&n._next))
+}
+
+func (n *segment) casNext(old, new unsafe.Pointer) bool {
+	return atomic.CompareAndSwapPointer(&n._next, old, new)
+}
+
+func (n *segment) prev() *segment {
+	return (*segment)(atomic.LoadPointer(&n._prev))
+}
+
+func (n *segment) casPrev(old, new unsafe.Pointer) bool {
+	return atomic.CompareAndSwapPointer(&n._prev, old, new)
 }
