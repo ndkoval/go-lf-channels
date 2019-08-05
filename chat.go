@@ -13,11 +13,11 @@ import _ "github.com/gonum/stat"
 
 var USERS = 1000
 var WORK = 100
-var SECONDS = 2
+var SECONDS = 5
 
 func main() {
-	for _, algo := range [...]int{2} {
-		for _, parallelism := range [...]int{1, 2, 4, 8, 12} {
+	for _, algo := range [...]int{1, 2, 3} {
+		for _, parallelism := range [...]int{1, 2, 4, 8, 16, 32, 64, 128, 144} {
 			var results= make([]float64, 10)
 			for i := 0; i < 10; i++ {
 				results[i] = float64(runBenchmark(algo, parallelism)) / float64(SECONDS)
@@ -43,13 +43,14 @@ func runBenchmark(algo, parallelism int) int {
 			r: rand.New(rand.NewSource(int64(i))),
 			inputGo: make(chan uintptr),
 			inputEuropar: NewLFChan(),
+			inputPPoPP: NewLFChanPPoPP(0),
 		}
 		users[i] = u
 		go func() {
 			switch algo {
 			case 1: u.workGo()
 			case 2: u.workEuropar()
-			//case 3: u.workPPoPP()
+			case 3: u.workPPoPP()
 			}
 		}()
 	}
@@ -74,6 +75,7 @@ type User struct {
 	msgSent int
 	inputGo chan uintptr
 	inputEuropar *LFChan
+	inputPPoPP *LFChanPPoPP
 	r *rand.Rand
 }
 
@@ -141,10 +143,48 @@ func (u *User) workEuropar() {
 	cancel()
 }
 
+func (u *User) workPPoPP() {
+	defer func() {
+		if recover() != nil { cancel() }
+	}()
+	sent := false
+	alts := []SelectPPoPPAlternative{
+		{
+			channel: nil,
+			element: nil,
+			action: func(result unsafe.Pointer) { sent = true },
+		},
+		{
+			channel: u.inputPPoPP,
+			element: ReceiverElement,
+			action: func(result unsafe.Pointer) { u.processMsg(uintptr(result)) },
+		},
+	}
+	waitForStart()
+	for !shouldStop() {
+		if u.messagesToSend >= 1 {
+			u.messagesToSend -= 1
+			i := u.id; for i == u.id { i = u.r.Intn(USERS) }
+			to := users[i]
+			msgToSend := unsafe.Pointer(uintptr(u.r.Uint64()) + 6000)
+			alts[0].channel = to.inputPPoPP
+			alts[0].element = msgToSend
+			sent = false
+			for !sent {
+				SelectPPoPPImpl(alts)
+			}
+			u.msgSent++
+		} else {
+			u.processMsg(uintptr(u.inputPPoPP.Receive()))
+		}
+	}
+	cancel()
+}
 
 func (u *User) processMsg(msg uintptr) {
 	u.messagesToSend += u.activity
-	ConsumeCPU(WORK)
+	prob := float64(1) / float64(WORK)
+	for u.r.Float64() > prob {}
 }
 
 var users = make([]*User, USERS)

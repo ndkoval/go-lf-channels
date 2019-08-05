@@ -6,9 +6,6 @@ import (
 	"unsafe"
 )
 
-var broken = (unsafe.Pointer) ((uintptr) (1))
-
-
 // == Channel structure ==
 
 type LFChan struct {

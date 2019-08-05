@@ -7,7 +7,6 @@ import (
 	"unsafe"
 )
 
-var ReceiverElement = (unsafe.Pointer) ((uintptr) (4096))
 type SelectAlternative struct {
 	channel *LFChan
 	element unsafe.Pointer
@@ -19,12 +18,12 @@ func Select(alternatives ...SelectAlternative)  {
 }
 
 func SelectUnbiased(alternatives ...SelectAlternative) {
-	alternatives = shuffleAlternatives(alternatives)
+	alternatives = shuffleAlternativesPPoPP(alternatives)
 	SelectImpl(alternatives)
 }
 
 // Shuffles alternatives randomly for `SelectUnbiased`.
-func shuffleAlternatives(alts []SelectAlternative) []SelectAlternative {
+func shuffleAlternativesPPoPP(alts []SelectAlternative) []SelectAlternative {
 	rand.Shuffle(len(alts), func (i, j int) {
 		alts[i], alts[j] = alts[j], alts[i]
 	})
@@ -246,9 +245,4 @@ func (s *SelectInstance) setState(newState unsafe.Pointer) {
 
 func (s *SelectInstance) casState(old, new unsafe.Pointer) bool {
 	return atomic.CompareAndSwapPointer(&s.state, old, new)
-}
-
-func IntType(p unsafe.Pointer) int32 {
-	if p == nil { panic( "WTF??!") }
-	return *(*int32)(p)
 }
