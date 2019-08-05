@@ -4,16 +4,13 @@ import (
 	"fmt"
 	"runtime"
 	"sync"
-	"sync/atomic"
 	"testing"
-	"time"
 	"unsafe"
 )
 
 const approxBatchSize = 100000
 
-var parallelism = []int{1, 2, 4} // number of scheduler threads
-//var parallelism = []int{1, 2, 4, 8, 16, 32, 64, 128, 144} // number of scheduler threads
+var parallelism = []int{1, 2, 4, 8, 16, 32, 64, 128, 144} // number of scheduler threads
 var goroutines = []int{0, 1000} // 0 -- number of scheduler threads
 var work = []int{100} // an additional work size (parameter for `consumeCPU`) for each operation
 
@@ -191,12 +188,3 @@ func runBenchmarkKoval(n int, producers int, consumers int, withSelect bool, wor
 }
 
 func dummy(result unsafe.Pointer) {}
-
-var consumedCPU = int32(time.Now().Unix())
-func ConsumeCPU(tokens int) {
-	t := int(atomic.LoadInt32(&consumedCPU)) // volatile read
-	for i := tokens; i > 0; i-- {
-		t += (t * 0x5DEECE66D + 0xB + i) & (0xFFFFFFFFFFFF)
-	}
-	if t == 42 { atomic.StoreInt32(&consumedCPU, consumedCPU + int32(t)) }
-}

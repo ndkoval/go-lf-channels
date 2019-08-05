@@ -44,6 +44,7 @@ type segment struct {
 	data     [segmentSize*2]unsafe.Pointer
 }
 
+
 func newNode(id int64, prev *segment) *segment {
 	return &segment{
 		id:       id,
