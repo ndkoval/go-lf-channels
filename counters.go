@@ -31,49 +31,55 @@ func (c *LFChanPPoPP) releaseWriteLock() {
 func (c *LFChanPPoPP) incSendersAndGetSnapshot() (senders uint64, receivers uint64) {
 	// == STEP 1. Acquire the read lock ==
 	// Increment the number of readers
-	lock := atomic.AddUint32(&c.lock, 1)
+	//lock := atomic.AddUint32(&c.lock, 1)
 	// Wait until write lock is released. It can't be acquired again until we decrement the number of readers.
-	for lock > _wLocked { lock = atomic.LoadUint32(&c.lock) }
+	//for lock > _wLocked { lock = atomic.LoadUint32(&c.lock) }
 
 	// == STEP 2. Perform the increment and get the snapshot
+	h1 := atomic.LoadUint64(&c.highest)
 	l := atomic.AddUint64(&c.lowest, 1 << _counterOffset)
-	h := c.highest
+	h2 := atomic.LoadUint64(&c.highest)
+	if h1 != h2 { panic("") }
+	//h := c.highest
 
 	// == STEP 3. Release the read lock
 	// Decrement the number of readers
-	atomic.AddUint32(&c.lock, ^uint32(0))
+	//atomic.AddUint32(&c.lock, ^uint32(0))
 
 	// == STEP 4. Fix overflow if needed
-	if (l >> _counterOffset) > _minOverflowedValue {
-		c.fixOverflow(_counterOffset, l, counterPart(h, _counterOffset))
-	}
+	//if (l >> _counterOffset) > _minOverflowedValue {
+	//	c.fixOverflow(_counterOffset, l, counterPart(h, _counterOffset))
+	//}
 
 	// == STEP 5. Return the snapshot
-	return countCounters(l, h)
+	return countCounters(l, h1)
 }
 
 func (c *LFChanPPoPP) incReceiversAndGetSnapshot() (senders uint64, receivers uint64) {
 	// == STEP 1. Acquire the read lock ==
 	// Increment the number of readers
-	lock := atomic.AddUint32(&c.lock, 1)
+	//lock := atomic.AddUint32(&c.lock, 1)
 	// Wait until write lock is released. It can't be acquired again until we decrement the number of readers.
-	for lock > _wLocked { lock = atomic.LoadUint32(&c.lock) }
+	//for lock > _wLocked { lock = atomic.LoadUint32(&c.lock) }
 
 	// == STEP 2. Perform the increment and get the snapshot
+	h1 := atomic.LoadUint64(&c.highest)
 	l := atomic.AddUint64(&c.lowest, 1)
-	h := c.highest
+	//h := c.highest
+	h2 := atomic.LoadUint64(&c.highest)
+	if h1 != h2 { panic("") }
 
 	// == STEP 3. Release the read lock
 	// Decrement the number of readers
-	atomic.AddUint32(&c.lock, ^uint32(0))
+	//atomic.AddUint32(&c.lock, ^uint32(0))
 
 	// == STEP 4. Fix overflow if needed
-	if (l & _counterMask) > _minOverflowedValue {
-		c.fixOverflow(0, l, counterPart(h, 0))
-	}
+	//if (l & _counterMask) > _minOverflowedValue {
+	//	c.fixOverflow(0, l, counterPart(h, 0))
+	//}
 
 	// == STEP 5. Return the snapshot
-	return countCounters(l, h)
+	return countCounters(l, h1)
 }
 
 func (c *LFChanPPoPP) fixOverflow(counterOffset uint32, curLowest uint64, curHighestPart uint64) {
