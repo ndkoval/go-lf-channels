@@ -1,9 +1,13 @@
 package main
 
 import (
+	"fmt"
 	"github.com/gonum/stat"
+	"log"
 	"math/rand"
+	"os"
 	"runtime"
+	"runtime/pprof"
 	"strconv"
 	"sync/atomic"
 	"time"
@@ -15,6 +19,8 @@ var USERS = 1000
 var WORK = 100
 var MAX_WORK = 10000
 var SECONDS = 5
+
+const USE_PROFILER = false
 
 func main() {
 	println("START CHAT BENCHMARK")
@@ -56,6 +62,15 @@ func runBenchmark(algo, parallelism int) int {
 			case 3: u.workPPoPP()
 			}
 		}()
+	}
+	if USE_PROFILER {
+		runtime.SetCPUProfileRate(1000)
+		f, err := os.Create(fmt.Sprintf("prof_A%dP%d.pprof", algo, parallelism))
+		if err != nil {
+			log.Fatal(err)
+		}
+		pprof.StartCPUProfile(f)
+		defer pprof.StopCPUProfile()
 	}
 	startBenchmark()
 	time.Sleep(time.Duration(SECONDS) * time.Second)
