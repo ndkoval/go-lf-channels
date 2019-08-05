@@ -238,7 +238,10 @@ func randGeom() []float64 {
 	for i := 0; i < USERS; i++ {
 		mean := 1.0 / 500
 		res := 0
-		for r.Float64() > mean { res++ }
+		for r.Float64() > mean {
+			res++
+			if res > 500 * 100 { break }
+		}
 		results[i] = float64(res) / 500
 	}
 	return results
