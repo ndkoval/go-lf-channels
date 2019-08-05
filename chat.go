@@ -13,11 +13,13 @@ import _ "github.com/gonum/stat"
 
 var USERS = 1000
 var WORK = 100
+var MAX_WORK = 10000
 var SECONDS = 5
 
 func main() {
+	println("START CHAT BENCHMARK")
 	for _, algo := range [...]int{1, 2, 3} {
-		for _, parallelism := range [...]int{1, 2, 4, 8, 16, 32, 64, 128, 144} {
+		for _, parallelism := range [...]int{1, 2, 4, 8, 12} {
 			var results= make([]float64, 10)
 			for i := 0; i < 10; i++ {
 				results[i] = float64(runBenchmark(algo, parallelism)) / float64(SECONDS)
@@ -26,6 +28,7 @@ func main() {
 			println("algo=" + strconv.FormatInt(int64(algo), 10) + ", parallelism=" + strconv.FormatInt(int64(parallelism), 10) + ", op/s=" + strconv.FormatFloat(mean, 'f', 0, 64) + ", std=" + strconv.FormatFloat(std/mean*100, 'f', 1, 64) + "%")
 		}
 	}
+	println("FINISH CHAT BENCHMARK")
 }
 
 func runBenchmark(algo, parallelism int) int {
@@ -38,7 +41,7 @@ func runBenchmark(algo, parallelism int) int {
 	for i := 0; i < USERS; i++ {
 		u := &User{
 			id: i,
-			activity: 1,
+			activity: activities[i],
 			messagesToSend: 1,
 			r: rand.New(rand.NewSource(int64(i))),
 			inputGo: make(chan uintptr),
@@ -183,8 +186,12 @@ func (u *User) workPPoPP() {
 
 func (u *User) processMsg(msg uintptr) {
 	u.messagesToSend += u.activity
+	w := 0
 	prob := float64(1) / float64(WORK)
-	for u.r.Float64() > prob {}
+	for u.r.Float64() > prob {
+		w++
+		if w > MAX_WORK { break }
+	}
 }
 
 var users = make([]*User, USERS)
@@ -221,4 +228,18 @@ func ConsumeCPU(tokens int) {
 		t += (t * 0x5DEECE66D + 0xB + i) & (0xFFFFFFFFFFFF)
 	}
 	if t == 42 { atomic.StoreInt32(&consumedCPU, consumedCPU + int32(t)) }
+}
+
+var activities = randGeom()
+
+func randGeom() []float64 {
+	r := rand.New(rand.NewSource(0))
+	results := make([]float64, USERS)
+	for i := 0; i < USERS; i++ {
+		mean := 1.0 / 500
+		res := 0
+		for r.Float64() > mean { res++ }
+		results[i] = float64(res) / 500
+	}
+	return results
 }
