@@ -47,7 +47,7 @@ func runBenchmark(algo, parallelism int) int {
 	for i := 0; i < USERS; i++ {
 		u := &User{
 			id: i,
-			activity: activities[i],
+			activity: (*activities)[i],
 			messagesToSend: 1,
 			r: rand.New(rand.NewSource(int64(i))),
 			inputGo: make(chan uintptr),
@@ -247,7 +247,7 @@ func ConsumeCPU(tokens int) {
 
 var activities = randGeom()
 
-func randGeom() []float64 {
+func randGeom() *[]float64 {
 	r := rand.New(rand.NewSource(0))
 	results := make([]float64, USERS)
 	for i := 0; i < USERS; i++ {
@@ -259,5 +259,5 @@ func randGeom() []float64 {
 		}
 		results[i] = float64(res) / 500
 	}
-	return results
+	return &results
 }
